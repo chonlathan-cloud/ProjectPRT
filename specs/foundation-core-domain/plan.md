@@ -5,9 +5,9 @@
 This document outlines a phased implementation plan for the foundation-core-domain of the PRT Software Accounting system. The plan is tailored for a small backend team utilizing Python, GCP, and Cloud SQL (Postgres), translating the approved [foundation specification](spec.md) into actionable steps. It prioritizes database setup, security, and a minimal viable workflow, ensuring adherence to all non-negotiable constraints.
 
 **References:**
-*   [specs/foundation-core-domain/spec.md](specs/foundation-core-domain/spec.md)
-*   [.docs/tdd/PRT_TDD_v2.md](.docs/tdd/PRT_TDD_v2.md)
-*   [.specify/memory/constitution.md](.specify/memory/constitution.md)
+*   [spec.md](spec.md)
+*   [.docs/tdd/PRT_TDD_v2.md](../../.docs/tdd/PRT_TDD_v2.md)
+*   [constitution.md](../../.specify/memory/constitution.md)
 
 ## 2. Constraints (Non-Negotiable Review)
 
@@ -26,7 +26,7 @@ The following constraints must be strictly adhered to throughout implementation:
 **Objective:** Establish the foundational database schema in Cloud SQL (Postgres) with all tables, columns, constraints, and relationships as defined in the foundation specification.
 
 **Deliverables:**
-*   **Database Migration Scripts:** Idempotent scripts (e.g., using Alembic or similar) to create all specified tables (`categories`, `cases`, `documents`, `payments`, `attachments`, `audit_logs`, `doc_counters`).
+*   **Database Migration Scripts:** Idempotent scripts (e.g., using Alembic or similar) to create all specified tables (`categories`, `cases`, `documents`, `payments`, `attachments`, `audit_logs`, `doc_counters`). Ensure the `cases` table includes a `purpose` field (TEXT) for audit-friendly descriptions.
 *   **Schema Enforcement:** Implementation of all `NOT NULL`, `UNIQUE` (especially `UNIQUE(case_id, doc_type)`), `DEFAULT` values, `ENUM` types (or equivalent checks), and Foreign Key constraints with `ON DELETE RESTRICT/NO ACTION`.
 *   **Initial Data Seed Script:** Script to populate essential initial data (e.g., base categories if required for testing).
 
@@ -79,6 +79,8 @@ The following constraints must be strictly adhered to throughout implementation:
     *   `POST /api/cases/{id}/settlement/submit`: Transition case status to `SETTLEMENT_SUBMITTED`.
 *   **DB Issuance API (`Accounting`):**
     *   `POST /api/cases/{id}/db/issue`: Create a `documents` entry for `doc_type=DB` (ensuring `UNIQUE(case_id, doc_type)`), generate `doc_no`, and transition case status to `DB_ISSUED`.
+*   **Case Closing API (Accounting/Admin):**
+    *   `POST /api/cases/{id}/close`: Transition case status from `DB_ISSUED` to `CLOSED`.
 *   **Get Case Details API:**
     *   `GET /api/cases/{id}`: Retrieve full details of a case including associated documents.
 
@@ -146,11 +148,12 @@ The following constraints must be strictly adhered to throughout implementation:
     10. As `Treasury`, disburses payment (payment recorded, status updated).
     11. As `Requester`, submits settlement (status updated).
     12. As `Accounting`, issues the `DB` (document generated, `UNIQUE(case_id, doc_type)` enforced, status updated).
-    13. Verifies final `Case` status is `CLOSED`.
-    14. Verifies all intermediate `documents`, `payments`, and `attachments` metadata exist and are correctly linked.
-    15. Verifies all expected `audit_logs` entries for the entire workflow are present and correctly detailed.
-    16. Verifies that attempting to create a second `CR` or `DB` for the same case fails with an appropriate error.
-    17. Verifies that `DB` amounts are available for dashboard-like queries.
+    13. As `Accounting` (or `Admin`), closes the Case (status updated to `CLOSED`).
+    14. Verifies final `Case` status is `CLOSED`.
+    15. Verifies all intermediate `documents`, `payments`, and `attachments` metadata exist and are correctly linked.
+    16. Verifies all expected `audit_logs` entries for the entire workflow are present and correctly detailed.
+    17. Verifies that attempting to create a second `CR` or `DB` for the same case fails with an appropriate error.
+    18. Verifies that `DB` amounts are available for dashboard-like queries.
 
 **Definition of Done:**
 *   The end-to-end integration test runs successfully without errors.

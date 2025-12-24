@@ -5,8 +5,8 @@ This document breaks down the implementation plan for the PRT Software Accountin
 **References:**
 *   [specs/foundation-core-domain/spec.md](specs/foundation-core-domain/spec.md)
 *   [specs/foundation-core-domain/plan.md](specs/foundation-core-domain/plan.md)
-*   [.docs/tdd/PRT_TDD_v2.md](.docs/tdd/PRT_TDD_v2.md)
-*   [.specify/memory/constitution.md](.specify/memory/constitution.md)
+*   [.docs/tdd/PRT_TDD_v2.md](../../.docs/tdd/PRT_TDD_v2.md)
+*   [.specify/memory/constitution.md](../../.specify/memory/constitution.md)
 
 ## Phase 1: Database Schema and Migrations
 
@@ -37,7 +37,8 @@ This document breaks down the implementation plan for the PRT Software Accountin
 ### Task 1.3: Implement `cases` Schema
 **Objective:** Create migration scripts for the `cases` table, including all columns, types, and foreign key references.
 **Acceptance Criteria:**
-*   Migration scripts for `cases` table (id, case_no, category_id, account_code, requester_id, department_id, cost_center_id, funding_type, requested_amount, status, created_by, created_at, updated_by, updated_at) are created.
+*   Migration scripts for `cases` table (id, case_no, category_id, account_code, requester_id, department_id, cost_center_id, funding_type, requested_amount, purpose, status, created_by, created_at, updated_by, updated_at) are created.
+*   `purpose` is required (NOT NULL) and stored as TEXT for audit-friendly descriptions.
 *   `category_id` has a foreign key constraint to `categories.id` (`ON DELETE RESTRICT`).
 *   `case_no` has a `UNIQUE` constraint.
 *   `ENUM` type for `cases.status` (DRAFT, SUBMITTED, etc.) is correctly implemented.
@@ -142,7 +143,7 @@ This document breaks down the implementation plan for the PRT Software Accountin
 **Objective:** Implement the API for a Requester to create a new case in `DRAFT` status.
 **Acceptance Criteria:**
 *   `POST /api/cases` endpoint is implemented and accessible by `Requester`/`Admin` roles.
-*   It requires `category_id`, `requested_amount`, `purpose` (optional for now, can be stored in `cases` table `details_json` if added), and ensures `category_id` is active and valid.
+*   It requires `category_id`, `requested_amount`, and `purpose` (required), and ensures `category_id` is active and valid.
 *   A new case is created in the `cases` table with `status = DRAFT`.
 *   The `account_code` is correctly denormalized from the selected category.
 *   **Enforce `1 Case = 1 Category = 1 Account Code` at creation.**

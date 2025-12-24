@@ -2,8 +2,7 @@
 
 ## Core Principles
 
-### I. Spec-First, Plan-Driven Delivery
-- All work must start from a written **spec** that is consistent with `docs/tdd/PRT_TDD_v2.md`.
+- All work must start from a written **spec** that is consistent with `.docs/tdd/PRT_TDD_v2.md`.
 - No implementation PR may be opened without:
   - `specs/<feature>/spec.md`
   - `specs/<feature>/plan.md`
@@ -126,3 +125,4 @@
 - All reviews must verify Constitution compliance.
 
 **Version**: 2.0.0 | **Ratified**: 2025-12-23 | **Last Amended**: 2025-12-23
+34.177.88.104 
