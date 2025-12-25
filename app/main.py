@@ -1,8 +1,8 @@
 from fastapi import FastAPI, Depends, HTTPException, status
+from sqlalchemy.orm import Session
 from app.db import get_db
 from app.deps import Role, has_role, get_current_user
-from sqlalchemy.orm import Session
-from sqlalchemy import text
+from app.routers.categories import router as categories_router
 
 app = FastAPI(
     title="PRT Software Accounting API",
@@ -10,11 +10,13 @@ app = FastAPI(
     version="0.1.0",
 )
 
+app.include_router(categories_router)
+
 @app.get("/healthz", tags=["Health Check"])
 async def health_check(db: Session = Depends(get_db)):
     try:
         # Try to execute a simple query to check database connectivity
-        db.execute(text("SELECT 1"))
+        db.execute("SELECT 1")
         return {"status": "ok", "database": "connected"}
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"Database connection failed: {e}")
@@ -30,4 +32,3 @@ async def finance_or_admin_route():
 @app.get("/requester-info", tags=["RBAC Demo"], dependencies=[Depends(has_role([Role.REQUESTER]))])
 async def requester_info_route():
     return {"message": "Welcome, Requester! Here is some info."}
-
