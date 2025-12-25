@@ -80,7 +80,7 @@ async def update_category(
     if not db_category:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Category not found.")
 
-    old_data = CategoryResponse.model_validate(db_category).model_dump()
+    old_data = CategoryResponse.model_validate(db_category).model_dump(mode='json')
 
     update_data = category_in.model_dump(exclude_unset=True)
 
@@ -112,7 +112,7 @@ async def update_category(
         action = "deactivate"
 
     db.flush()
-    new_data = CategoryResponse.model_validate(db_category).model_dump()
+    new_data = CategoryResponse.model_validate(db_category).model_dump(mode='json')
 
     log_audit_event(
         db,
