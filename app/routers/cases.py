@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select, and_, or_
 
 from app.db import get_db
-from app.deps import Role, has_role, get_current_user
+from app.deps import Role, has_role, get_current_user, UserInDB
 from app.models import Category, Case, CaseStatus, FundingType
 from app.schemas.case import CaseCreate, CaseResponse, CaseSubmit
 from app.services.audit import log_audit_event
@@ -30,7 +30,7 @@ def generate_case_no() -> str:
 @router.post("/", response_model=CaseResponse, status_code=status.HTTP_201_CREATED)
 async def create_case(
     case_in: CaseCreate,
-    current_user: Annotated[str, Depends(has_role([Role.REQUESTER]))],
+    current_user: Annotated[UserInDB, Depends(has_role([Role.REQUESTER]))],
     db: Session = Depends(get_db)
 ):
     # Validate category exists and is active
@@ -53,14 +53,14 @@ async def create_case(
         case_no=case_no,
         category_id=case_in.category_id,
         account_code=account_code, # Denormalized
-        requester_id=current_user,
+        requester_id=current_user.username,
         department_id=case_in.department_id,
         cost_center_id=case_in.cost_center_id,
         funding_type=case_in.funding_type,
         requested_amount=case_in.requested_amount,
         purpose=case_in.purpose,
         status=CaseStatus.DRAFT, # Initial status
-        created_by=current_user
+        created_by=current_user.username
     )
 
     db.add(db_case)
@@ -71,7 +71,7 @@ async def create_case(
         entity_type="case",
         entity_id=db_case.id,
         action="create",
-        performed_by=current_user,
+        performed_by=current_user.username,
         details_json=case_in.model_dump(mode="json") # JSON-serializable payload
     )
 
@@ -84,7 +84,7 @@ async def create_case(
 async def submit_case(
     case_id: UUID,
     # case_submit: CaseSubmit, # Not strictly needed if body is empty
-    current_user: Annotated[str, Depends(has_role([Role.REQUESTER]))],
+    current_user: Annotated[UserInDB, Depends(has_role([Role.REQUESTER]))],
     db: Session = Depends(get_db)
 ):
     db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
@@ -92,7 +92,7 @@ async def submit_case(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found.")
 
     # Visibility rule: requester can submit ONLY their own case
-    if db_case.requester_id != current_user:
+    if db_case.requester_id != current_user.username:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to submit this case.")
 
     # Allowed transition: DRAFT -> SUBMITTED only
@@ -101,7 +101,7 @@ async def submit_case(
 
     old_status = db_case.status
     db_case.status = CaseStatus.SUBMITTED
-    db_case.updated_by = current_user
+    db_case.updated_by = current_user.username
     db_case.updated_at = datetime.now(timezone.utc)
 
     db.flush()
@@ -111,7 +111,7 @@ async def submit_case(
         entity_type="case",
         entity_id=db_case.id,
         action="submit",
-        performed_by=current_user,
+        performed_by=current_user.username,
         details_json={
             "old_status": old_status.value,
             "new_status": db_case.status.value
@@ -125,8 +125,7 @@ async def submit_case(
 
 @router.get("/", response_model=List[CaseResponse])
 async def read_cases(
-    current_user: Annotated[str, Depends(get_current_user)],
-    current_user_roles: Annotated[List[Role], Depends(has_role([]))],
+    current_user: Annotated[UserInDB, Depends(get_current_user)],
     db: Session = Depends(get_db),
     status: Optional[CaseStatus] = None
 ):
@@ -134,14 +133,14 @@ async def read_cases(
     conditions = []
 
     # Determine if the current user has any non-requester special roles
-    can_see_all = any(role in current_user_roles for role in [
+    can_see_all = any(role in current_user.roles for role in [
         Role.FINANCE, Role.ACCOUNTING, Role.ADMIN, Role.EXECUTIVE, Role.TREASURY
     ])
 
     # Visibility rules
     if not can_see_all:
         # If the user is only a REQUESTER (or has no special roles), they can only see their own cases
-        conditions.append(Case.requester_id == current_user)
+        conditions.append(Case.requester_id == current_user.username)
 
     if status:
         conditions.append(Case.status == status)
@@ -157,8 +156,7 @@ async def read_cases(
 @router.get("/{case_id}", response_model=CaseResponse)
 async def read_case(
     case_id: UUID,
-    current_user: Annotated[str, Depends(get_current_user)],
-    current_user_roles: Annotated[List[Role], Depends(has_role([]))],
+    current_user: Annotated[UserInDB, Depends(get_current_user)],
     db: Session = Depends(get_db)
 ):
     db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
@@ -166,14 +164,14 @@ async def read_case(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found.")
 
     # Determine if the current user has any non-requester special roles
-    can_see_all = any(role in current_user_roles for role in [
+    can_see_all = any(role in current_user.roles for role in [
         Role.FINANCE, Role.ACCOUNTING, Role.ADMIN, Role.EXECUTIVE, Role.TREASURY
     ])
 
     # Visibility rules
     if not can_see_all:
         # If the user is only a REQUESTER (or has no special roles), they can only see their own cases
-        if db_case.requester_id != current_user:
+        if db_case.requester_id != current_user.username:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to view this case.")
 
     return CaseResponse.model_validate(db_case)
