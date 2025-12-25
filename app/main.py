@@ -1,8 +1,10 @@
 from fastapi import FastAPI, Depends, HTTPException, status
 from sqlalchemy.orm import Session
+from sqlalchemy import text # Import text here
 from app.db import get_db
 from app.deps import Role, has_role, get_current_user
 from app.routers.categories import router as categories_router
+from app.routers.cases import router as cases_router
 
 app = FastAPI(
     title="PRT Software Accounting API",
@@ -11,12 +13,13 @@ app = FastAPI(
 )
 
 app.include_router(categories_router)
+app.include_router(cases_router)
 
 @app.get("/healthz", tags=["Health Check"])
 async def health_check(db: Session = Depends(get_db)):
     try:
         # Try to execute a simple query to check database connectivity
-        db.execute("SELECT 1")
+        db.execute(text("SELECT 1")) # Use text("SELECT 1")
         return {"status": "ok", "database": "connected"}
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"Database connection failed: {e}")
