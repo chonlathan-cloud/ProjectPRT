@@ -2,8 +2,9 @@ from datetime import datetime, timezone
 from typing import Optional, List, Annotated
 from uuid import UUID
 import uuid
+import decimal # Import decimal for precise financial calculations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import select, and_
 
@@ -12,6 +13,7 @@ from app.deps import Role, has_role, get_current_user, UserInDB
 from app.models import Category, Case, CaseStatus, FundingType, Document, DocCounter, Payment, PaymentType, DocumentType, AuditLog
 from app.schemas.case import CaseCreate, CaseResponse, CaseSubmit
 from app.schemas.workflow import PaymentCreate, SettlementSubmit, WorkflowResponse
+from app.schemas.adjustment import AdjustmentType, AdjustmentCreate, PaymentOut, VarianceResponse # New imports
 from app.services.audit import log_audit_event
 
 router = APIRouter(
@@ -57,14 +59,72 @@ def _generate_document_no(db: Session, doc_prefix_enum: DocumentType) -> str:
     doc_no = f"{doc_prefix}-{current_ym}-{padded_number}"
     return doc_no
 
+
+async def _calculate_variance_info(
+    db: Session,
+    case_id: UUID,
+) -> dict:
+    """
+    Helper function to calculate variance and expected adjustment details.
+    """
+    cr_document = db.execute(
+        select(Document).filter_by(case_id=case_id, doc_type=DocumentType.CR)
+    ).scalar_one_or_none()
+    db_document = db.execute(
+        select(Document).filter_by(case_id=case_id, doc_type=DocumentType.DB)
+    ).scalar_one_or_none()
+
+    if not cr_document or not db_document:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="CR or DB document not found for this case.")
+
+    cr_amount = decimal.Decimal(cr_document.amount)
+    db_amount = decimal.Decimal(db_document.amount)
+    variance = db_amount - cr_amount
+
+    expected_adjustment_type = None
+    expected_adjustment_amount = decimal.Decimal("0.00")
+
+    if variance < 0:
+        expected_adjustment_type = AdjustmentType.REFUND
+        expected_adjustment_amount = abs(variance)
+    elif variance > 0:
+        expected_adjustment_type = AdjustmentType.ADDITIONAL
+        expected_adjustment_amount = variance
+
+    return {
+        "cr_amount": cr_amount,
+        "db_amount": db_amount,
+        "variance": variance,
+        "expected_adjustment_type": expected_adjustment_type,
+        "expected_adjustment_amount": expected_adjustment_amount,
+    }
+
+# --- Inserted helper for case visibility rules ---
+def _ensure_case_visibility(
+    db_case: Case,
+    current_user: UserInDB,
+) -> None:
+    """
+    Enforce case visibility rules:
+    - Non-privileged users (requester-only) can only access their own cases.
+    - Privileged roles can access all cases.
+    """
+    can_see_all = any(role in current_user.roles for role in [
+        Role.FINANCE, Role.ACCOUNTING, Role.ADMIN, Role.EXECUTIVE, Role.TREASURY
+    ])
+
+    if not can_see_all and db_case.requester_id != current_user.username:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to view this case.")
+
+
 @router.post("/", response_model=CaseResponse, status_code=status.HTTP_201_CREATED)
 async def create_case(
-    case_in: CaseCreate,
-    current_user: Annotated[UserInDB, Depends(has_role([Role.REQUESTER]))],
+    payload: CaseCreate,
+    current_user: Annotated[str, Depends(get_current_user)],
     db: Session = Depends(get_db)
 ):
     # Validate category exists and is active
-    category = db.execute(select(Category).filter_by(id=case_in.category_id)).scalar_one_or_none()
+    category = db.execute(select(Category).filter_by(id=payload.category_id)).scalar_one_or_none()
     if not category:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Category not found.")
     if not category.is_active:
@@ -81,14 +141,14 @@ async def create_case(
 
     db_case = Case(
         case_no=case_no,
-        category_id=case_in.category_id,
+        category_id=payload.category_id,
         account_code=account_code, # Denormalized
         requester_id=current_user.username,
-        department_id=case_in.department_id,
-        cost_center_id=case_in.cost_center_id,
-        funding_type=case_in.funding_type,
-        requested_amount=case_in.requested_amount,
-        purpose=case_in.purpose,
+        department_id=payload.department_id,
+        cost_center_id=payload.cost_center_id,
+        funding_type=payload.funding_type,
+        requested_amount=payload.requested_amount,
+        purpose=payload.purpose,
         status=CaseStatus.DRAFT, # Initial status
         created_by=current_user.username
     )
@@ -102,7 +162,7 @@ async def create_case(
         entity_id=db_case.id,
         action="create",
         performed_by=current_user.username,
-        details_json=case_in.model_dump(mode="json") # JSON-serializable payload
+        details_json=payload.model_dump(mode="json") # JSON-serializable payload
     )
 
     db.commit()
@@ -472,7 +532,7 @@ async def db_issue_case(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Settlement actual_amount not found in audit logs. Settlement might not have been submitted."
             )
-        actual_amount = settlement_audit_log.details_json["actual_amount"]
+        actual_amount = decimal.Decimal(settlement_audit_log.details_json["actual_amount"])
 
         # Find CR document amount
         cr_document = db.execute(
@@ -482,7 +542,7 @@ async def db_issue_case(
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail=f"CR document not found for case {case_id}."
             )
-        cr_amount = float(cr_document.amount)
+        cr_amount = decimal.Decimal(cr_document.amount)
 
         # Generate DB doc_no via doc_counters
         db_doc_no = _generate_document_no(db, DocumentType.DB)
@@ -523,9 +583,9 @@ async def db_issue_case(
                 "old_status": old_status.value,
                 "new_status": db_case.status.value,
                 "db_doc_no": db_doc_no,
-                "actual_amount": actual_amount,
-                "cr_amount": cr_amount,
-                "variance": variance
+                "actual_amount": float(actual_amount), # Ensure JSON-serializable
+                "cr_amount": float(cr_amount), # Ensure JSON-serializable
+                "variance": float(variance) # Ensure JSON-serializable
             }
         )
         db.refresh(db_case)
@@ -537,11 +597,12 @@ async def db_issue_case(
             audit_details={
                 "new_status": db_case.status.value,
                 "db_doc_no": db_doc_no,
-                "actual_amount": actual_amount,
-                "cr_amount": cr_amount,
-                "variance": variance
+                "actual_amount": float(actual_amount),
+                "cr_amount": float(cr_amount),
+                "variance": float(variance)
             }
         )
+
 
 @router.get("/", response_model=List[CaseResponse])
 async def read_cases(
@@ -595,3 +656,139 @@ async def read_case(
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to view this case.")
 
     return CaseResponse.model_validate(db_case)
+
+# --- Inserted variance endpoint ---
+
+@router.get("/{case_id}/variance", response_model=VarianceResponse)
+async def get_case_variance(
+    case_id: UUID,
+    current_user: Annotated[UserInDB, Depends(get_current_user)],
+    db: Session = Depends(get_db),
+):
+    # Ensure the case exists
+    db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
+    if not db_case:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found.")
+
+    # Visibility rule
+    _ensure_case_visibility(db_case, current_user)
+
+    # Compute variance info (requires both CR and DB documents)
+    info = await _calculate_variance_info(db, case_id)
+
+    # Fetch recorded adjustments (payments of type REFUND/ADDITIONAL)
+    adjustments = db.execute(
+        select(Payment)
+        .filter_by(case_id=case_id)
+        .where(Payment.type.in_([PaymentType.REFUND, PaymentType.ADDITIONAL]))
+        .order_by(Payment.paid_at.asc())
+    ).scalars().all()
+
+    return VarianceResponse(
+        case_id=case_id,
+        cr_amount=info["cr_amount"],
+        db_amount=info["db_amount"],
+        variance=info["variance"],
+        expected_adjustment_type=info["expected_adjustment_type"],
+        expected_adjustment_amount=info["expected_adjustment_amount"],
+        adjustments_recorded=[PaymentOut.model_validate(p) for p in adjustments],
+    )
+
+# --- Under/Over Adjustment endpoint ---
+@router.post("/{case_id}/adjustments", response_model=PaymentOut, status_code=status.HTTP_201_CREATED)
+async def create_case_adjustment(
+    case_id: UUID,
+    adjustment_in: AdjustmentCreate,
+    current_user: Annotated[UserInDB, Depends(has_role([Role.TREASURY, Role.ADMIN]))],
+    db: Session = Depends(get_db),
+):
+    """
+    Record an under/over adjustment after DB is issued.
+    - If DB < CR => expected REFUND
+    - If DB > CR => expected ADDITIONAL
+    Adjustment is recorded as a Payment row with type REFUND or ADDITIONAL.
+    """
+    with db.begin():
+        db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
+        if not db_case:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found.")
+
+        # Must have reached the end of the workflow (DB issued & case closed in this implementation)
+        if db_case.status != CaseStatus.CLOSED:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Case must be CLOSED to record adjustment, but is {db_case.status.value}."
+            )
+
+        # Compute expected adjustment type/amount from CR and DB
+        info = await _calculate_variance_info(db, case_id)
+        expected_type = info["expected_adjustment_type"]
+        expected_amount = info["expected_adjustment_amount"]
+
+        if expected_type is None or expected_amount == decimal.Decimal("0.00"):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="No adjustment is required for this case."
+            )
+
+        # Validate requested adjustment type matches expectation
+        if adjustment_in.type != expected_type:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Invalid adjustment type. Expected {expected_type.value}."
+            )
+
+        # Sum existing adjustments recorded (same type)
+        existing_adjustments = db.execute(
+            select(Payment)
+            .filter_by(case_id=case_id)
+            .where(Payment.type.in_([PaymentType.REFUND, PaymentType.ADDITIONAL]))
+        ).scalars().all()
+
+        existing_total = decimal.Decimal("0.00")
+        for p in existing_adjustments:
+            if p.type.value == expected_type.value:
+                existing_total += decimal.Decimal(p.amount)
+
+        remaining = expected_amount - existing_total
+        if remaining <= decimal.Decimal("0.00"):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Adjustment has already been fully recorded for this case."
+            )
+
+        # Enforce exact match to remaining (audit-friendly, avoids partial states)
+        if decimal.Decimal(adjustment_in.amount) != remaining:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Adjustment amount must equal the remaining expected amount: {str(remaining)}"
+            )
+
+        payment_type = PaymentType.REFUND if adjustment_in.type == AdjustmentType.REFUND else PaymentType.ADDITIONAL
+
+        db_payment = Payment(
+            case_id=case_id,
+            type=payment_type,
+            amount=adjustment_in.amount,
+            paid_by=current_user.username,
+            paid_at=datetime.now(timezone.utc),
+            reference_no=adjustment_in.reference_no,
+        )
+        db.add(db_payment)
+        db.flush()
+
+        log_audit_event(
+            db,
+            entity_type="case",
+            entity_id=db_case.id,
+            action="adjustment_record",
+            performed_by=current_user.username,
+            details_json={
+                "type": adjustment_in.type.value,
+                "amount": float(adjustment_in.amount),
+                "reference_no": adjustment_in.reference_no,
+                "expected_amount": float(expected_amount),
+            },
+        )
+
+        return PaymentOut.model_validate(db_payment)
