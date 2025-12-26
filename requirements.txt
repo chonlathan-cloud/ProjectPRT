@@ -5,3 +5,5 @@ SQLAlchemy==2.0.45
 psycopg2-binary==2.9.11
 alembic==1.13.1
 greenlet==3.3.0
+google-cloud-storage==2.14.0
+reportlab==4.4.7

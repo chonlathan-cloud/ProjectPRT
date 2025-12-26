@@ -10,11 +10,17 @@ from sqlalchemy import select, and_
 
 from app.db import get_db
 from app.deps import Role, has_role, get_current_user, UserInDB
-from app.models import Category, Case, CaseStatus, FundingType, Document, DocCounter, Payment, PaymentType, DocumentType, AuditLog
+from app.models import Category, Case, CaseStatus, FundingType, Document, DocCounter, Payment, PaymentType, DocumentType, AuditLog, Attachment
 from app.schemas.case import CaseCreate, CaseResponse, CaseSubmit
 from app.schemas.workflow import PaymentCreate, SettlementSubmit, WorkflowResponse
 from app.schemas.adjustment import AdjustmentType, AdjustmentCreate, PaymentOut, VarianceResponse # New imports
+from app.schemas.attachment import AttachmentOut # New import
+from app.schemas.files import SignedUrlResponse
 from app.services.audit import log_audit_event
+from app.config import settings # New import
+from app.services import gcs # New import
+from app.services import pdf # New import
+
 
 router = APIRouter(
     prefix="/api/cases",
@@ -120,7 +126,7 @@ def _ensure_case_visibility(
 @router.post("/", response_model=CaseResponse, status_code=status.HTTP_201_CREATED)
 async def create_case(
     payload: CaseCreate,
-    current_user: Annotated[str, Depends(get_current_user)],
+    current_user: Annotated[UserInDB, Depends(has_role([Role.REQUESTER]))], # Fix: Use UserInDB and has_role
     db: Session = Depends(get_db)
 ):
     # Validate category exists and is active
@@ -245,15 +251,49 @@ async def ps_approve_case(
         ps_doc_no = _generate_document_no(db, DocumentType.PS)
 
         # Create documents row (doc_type=PS, amount=case.requested_amount, created_by=current_user.username)
+        # Generate PDF bytes for PS
+        ps_pdf_bytes = pdf.generate_ps_pdf(
+            case_id=str(db_case.id),
+            case_no=db_case.case_no,
+            doc_no=ps_doc_no,
+            requester_id=db_case.requester_id,
+            category_id=db_case.category_id,
+            account_code=db_case.account_code,
+            amount=float(db_case.requested_amount),
+            created_at=datetime.now(timezone.utc).isoformat()
+        )
+
+        # Define GCS object name
+        ps_object_name = f"{settings.GCS_BASE_PATH}/cases/{db_case.id}/documents/PS/{ps_doc_no}.pdf"
+
+        # Upload PDF bytes to GCS
+        ps_pdf_uri = gcs.upload_bytes(object_name=ps_object_name, data=ps_pdf_bytes, content_type="application/pdf")
+
         db_ps_document = Document(
             case_id=case_id,
             doc_type=DocumentType.PS,
             doc_no=ps_doc_no,
             amount=db_case.requested_amount,
-            pdf_uri="placeholder_ps_uri", # Placeholder for now
+            pdf_uri=ps_pdf_uri, # Real GCS URI
             created_by=current_user.username
         )
         db.add(db_ps_document)
+        db.flush() # Flush to ensure db_ps_document has an ID for audit log
+
+        # Audit log for PDF generation
+        log_audit_event(
+            db,
+            entity_type="document",
+            entity_id=db_ps_document.id,
+            action="pdf_generated",
+            performed_by=current_user.username,
+            details_json={
+                "case_id": str(db_case.id),
+                "doc_type": DocumentType.PS.value,
+                "doc_no": ps_doc_no,
+                "pdf_uri": ps_pdf_uri
+            }
+        )
 
         # Update case.status=PS_APPROVED
         old_status = db_case.status
@@ -317,16 +357,50 @@ async def cr_issue_case(
         # Generate CR doc_no via doc_counters
         cr_doc_no = _generate_document_no(db, DocumentType.CR)
 
+        # Generate PDF bytes for CR
+        cr_pdf_bytes = pdf.generate_cr_pdf(
+            case_id=str(db_case.id),
+            case_no=db_case.case_no,
+            doc_no=cr_doc_no,
+            requester_id=db_case.requester_id,
+            category_id=db_case.category_id,
+            account_code=db_case.account_code,
+            amount=float(db_case.requested_amount),
+            created_at=datetime.now(timezone.utc).isoformat()
+        )
+
+        # Define GCS object name
+        cr_object_name = f"{settings.GCS_BASE_PATH}/cases/{db_case.id}/documents/CR/{cr_doc_no}.pdf"
+
+        # Upload PDF bytes to GCS
+        cr_pdf_uri = gcs.upload_bytes(object_name=cr_object_name, data=cr_pdf_bytes, content_type="application/pdf")
+
         # Create documents row (doc_type=CR, amount=case.requested_amount)
         db_cr_document = Document(
             case_id=case_id,
             doc_type=DocumentType.CR,
             doc_no=cr_doc_no,
             amount=db_case.requested_amount,
-            pdf_uri="placeholder_cr_uri", # Placeholder for now
+            pdf_uri=cr_pdf_uri, # Real GCS URI
             created_by=current_user.username
         )
         db.add(db_cr_document)
+        db.flush() # Flush to ensure db_cr_document has an ID for audit log
+
+        # Audit log for PDF generation
+        log_audit_event(
+            db,
+            entity_type="document",
+            entity_id=db_cr_document.id,
+            action="pdf_generated",
+            performed_by=current_user.username,
+            details_json={
+                "case_id": str(db_case.id),
+                "doc_type": DocumentType.CR.value,
+                "doc_no": cr_doc_no,
+                "pdf_uri": cr_pdf_uri
+            }
+        )
 
         # Update case.status=CR_ISSUED
         old_status = db_case.status
@@ -547,16 +621,57 @@ async def db_issue_case(
         # Generate DB doc_no via doc_counters
         db_doc_no = _generate_document_no(db, DocumentType.DB)
 
+        variance = actual_amount - cr_amount # Calculate variance before PDF generation
+
+        # Generate PDF bytes for DB
+        db_pdf_bytes = pdf.generate_db_pdf(
+            case_id=str(db_case.id),
+            case_no=db_case.case_no,
+            doc_no=db_doc_no,
+            requester_id=db_case.requester_id,
+            category_id=db_case.category_id,
+            account_code=db_case.account_code,
+            amount=float(actual_amount),
+            created_at=datetime.now(timezone.utc).isoformat(),
+            cr_amount=float(cr_amount),
+            variance=float(variance)
+        )
+
+        # Define GCS object name
+        db_object_name = f"{settings.GCS_BASE_PATH}/cases/{db_case.id}/documents/DB/{db_doc_no}.pdf"
+
+        # Upload PDF bytes to GCS
+        db_pdf_uri = gcs.upload_bytes(object_name=db_object_name, data=db_pdf_bytes, content_type="application/pdf")
+
         # Create documents row (doc_type=DB, amount=actual_amount)
         db_db_document = Document(
             case_id=case_id,
             doc_type=DocumentType.DB,
             doc_no=db_doc_no,
             amount=actual_amount,
-            pdf_uri="placeholder_db_uri", # Placeholder for now
+            pdf_uri=db_pdf_uri, # Real GCS URI
             created_by=current_user.username
         )
         db.add(db_db_document)
+        db.flush() # Flush to ensure db_db_document has an ID for audit log
+
+        # Audit log for PDF generation
+        log_audit_event(
+            db,
+            entity_type="document",
+            entity_id=db_db_document.id,
+            action="pdf_generated",
+            performed_by=current_user.username,
+            details_json={
+                "case_id": str(db_case.id),
+                "doc_type": DocumentType.DB.value,
+                "doc_no": db_doc_no,
+                "pdf_uri": db_pdf_uri,
+                "actual_amount": float(actual_amount),
+                "cr_amount": float(cr_amount),
+                "variance": float(variance)
+            }
+        )
 
         # Update case.status=DB_ISSUED then CLOSED
         old_status = db_case.status
@@ -738,33 +853,26 @@ async def create_case_adjustment(
                 detail=f"Invalid adjustment type. Expected {expected_type.value}."
             )
 
-        # Sum existing adjustments recorded (same type)
-        existing_adjustments = db.execute(
-            select(Payment)
-            .filter_by(case_id=case_id)
-            .where(Payment.type.in_([PaymentType.REFUND, PaymentType.ADDITIONAL]))
-        ).scalars().all()
-
-        existing_total = decimal.Decimal("0.00")
-        for p in existing_adjustments:
-            if p.type.value == expected_type.value:
-                existing_total += decimal.Decimal(p.amount)
-
-        remaining = expected_amount - existing_total
-        if remaining <= decimal.Decimal("0.00"):
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Adjustment has already been fully recorded for this case."
-            )
-
-        # Enforce exact match to remaining (audit-friendly, avoids partial states)
-        if decimal.Decimal(adjustment_in.amount) != remaining:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"Adjustment amount must equal the remaining expected amount: {str(remaining)}"
-            )
-
         payment_type = PaymentType.REFUND if adjustment_in.type == AdjustmentType.REFUND else PaymentType.ADDITIONAL
+
+        # Check for existing adjustment of the same type
+        existing_adjustment = db.execute(
+            select(Payment)
+            .filter_by(case_id=case_id, type=payment_type)
+        ).scalar_one_or_none()
+
+        if existing_adjustment:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"A {adjustment_in.type.value} adjustment has already been recorded for this case."
+            )
+
+        # Enforce exact match to expected amount
+        if adjustment_in.amount != expected_amount:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Adjustment amount must exactly match the expected amount: {str(expected_amount)}"
+            )
 
         db_payment = Payment(
             case_id=case_id,
@@ -787,8 +895,79 @@ async def create_case_adjustment(
                 "type": adjustment_in.type.value,
                 "amount": float(adjustment_in.amount),
                 "reference_no": adjustment_in.reference_no,
-                "expected_amount": float(expected_amount),
+                "cr_amount": float(info["cr_amount"]),
+                "db_amount": float(info["db_amount"]),
+                "variance": float(info["variance"])
             },
         )
 
         return PaymentOut.model_validate(db_payment)
+
+@router.get("/{case_id}/attachments", response_model=List[AttachmentOut])
+async def list_attachments(
+    case_id: UUID,
+    current_user: Annotated[UserInDB, Depends(get_current_user)],
+    db: Session = Depends(get_db)
+):
+    db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
+    if not db_case:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found.")
+
+    _ensure_case_visibility(db_case, current_user)
+
+    attachments = db.execute(
+        select(Attachment)
+        .filter_by(case_id=case_id)
+        .order_by(Attachment.uploaded_at.desc())
+    ).scalars().all()
+
+    return [AttachmentOut.model_validate(att) for att in attachments]
+
+
+@router.get("/{case_id}/attachments/{attachment_id}/download-url", response_model=SignedUrlResponse)
+async def get_attachment_download_url(
+    case_id: UUID,
+    attachment_id: UUID,
+    current_user: Annotated[UserInDB, Depends(get_current_user)],
+    db: Session = Depends(get_db)
+):
+    db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
+    if not db_case:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found.")
+
+    _ensure_case_visibility(db_case, current_user)
+
+    db_attachment = db.execute(
+        select(Attachment)
+        .filter_by(id=attachment_id, case_id=case_id)
+    ).scalar_one_or_none()
+
+    if not db_attachment:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Attachment not found.")
+
+    # Extract object_name from gcs_uri
+    object_name_start_index = len(f"gs://{settings.GCS_BUCKET_NAME}/")
+    object_name = db_attachment.gcs_uri[object_name_start_index:]
+
+    signed_url = gcs.generate_signed_download_url(object_name=object_name)
+
+    log_audit_event(
+        db,
+        entity_type="attachment",
+        entity_id=db_attachment.id,
+        action="attachment_download_url_generated",
+        performed_by=current_user.username,
+        details_json={
+            "case_id": str(db_case.id),
+            "attachment_id": str(db_attachment.id),
+            "gcs_uri": db_attachment.gcs_uri,
+            "expires_in_seconds": settings.SIGNED_URL_EXPIRATION_SECONDS
+        }
+    )
+    db.commit()
+
+    return SignedUrlResponse(
+        signed_url=signed_url,
+        method="GET",
+        expires_in=settings.SIGNED_URL_EXPIRATION_SECONDS
+    )
