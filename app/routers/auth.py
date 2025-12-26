@@ -1,6 +1,9 @@
 from fastapi import APIRouter
 
-from app.schemas.common import make_success_response
+from app.core.settings import settings
+from fastapi.responses import JSONResponse
+
+from app.schemas.common import make_success_response, make_error_response
 from app.schemas.auth import (
     GoogleAuthRequest,
     GoogleAuthData,
@@ -16,6 +19,16 @@ router = APIRouter(
 
 @router.post("/google", response_model=GoogleAuthResponse)
 async def auth_google(payload: GoogleAuthRequest):
+    if not settings.USE_MOCK_DATA:
+        return JSONResponse(
+            status_code=501,
+            content=make_error_response(
+                code="NOT_IMPLEMENTED",
+                message="Mock data disabled for auth endpoint",
+                details={},
+            ),
+        )
+
     data = GoogleAuthData(
         access_token="mock_jwt_token",
         user=GoogleUser(

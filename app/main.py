@@ -1,11 +1,8 @@
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import Session
-from sqlalchemy import text
 
 from app.core.settings import settings
-from app.db import get_db
-from app.deps import Role, has_role, get_current_user
+from app.deps import Role, has_role
 from app.routers.categories import router as categories_router
 from app.routers.cases import router as cases_router
 from app.routers.files import router as files_router
@@ -37,13 +34,8 @@ app.include_router(transactions_router)
 app.include_router(auth_router)
 
 @app.get("/healthz", tags=["Health Check"])
-async def health_check(db: Session = Depends(get_db)):
-    try:
-        # Try to execute a simple query to check database connectivity
-        db.execute(text("SELECT 1"))
-        return {"status": "ok", "database": "connected"}
-    except Exception as e:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"Database connection failed: {e}")
+async def health_check():
+    return {"status": "ok"}
 
 @app.get("/admin-only", tags=["RBAC Demo"], dependencies=[Depends(has_role([Role.ADMIN]))])
 async def admin_only_route():

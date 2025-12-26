@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Request, status
 from fastapi.responses import JSONResponse
 
+from app.core.settings import settings
 from app.schemas.common import make_error_response, make_success_response
 from app.schemas.transactions import (
     TransactionCreateRequest,
@@ -27,6 +28,19 @@ def _require_auth(request: Request):
     return None
 
 
+def _require_mock_data():
+    if not settings.USE_MOCK_DATA:
+        return JSONResponse(
+            status_code=501,
+            content=make_error_response(
+                code="NOT_IMPLEMENTED",
+                message="Mock data disabled for transaction endpoints",
+                details={},
+            ),
+        )
+    return None
+
+
 @router.post(
     "",
     response_model=TransactionCreateResponse,
@@ -39,6 +53,10 @@ async def create_transaction(
     unauthorized_response = _require_auth(request)
     if unauthorized_response:
         return unauthorized_response
+
+    mock_response = _require_mock_data()
+    if mock_response:
+        return mock_response
 
     data = TransactionCreateData(
         transaction_id="tx_mock_0001",

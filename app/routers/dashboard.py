@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse
 
 from app.schemas.common import make_error_response, make_success_response
 from app.schemas.dashboard import SummaryData, MonthlyItem, SummaryResponse, MonthlyResponse
+from app.core.settings import settings
 
 router = APIRouter(
     prefix="/api/v1/dashboard",
@@ -23,11 +24,28 @@ def _require_auth(request: Request):
     return None
 
 
+def _require_mock_data():
+    if not settings.USE_MOCK_DATA:
+        return JSONResponse(
+            status_code=501,
+            content=make_error_response(
+                code="NOT_IMPLEMENTED",
+                message="Mock data disabled for dashboard endpoints",
+                details={},
+            ),
+        )
+    return None
+
+
 @router.get("/summary", response_model=SummaryResponse)
 async def get_dashboard_summary(request: Request):
     unauthorized_response = _require_auth(request)
     if unauthorized_response:
         return unauthorized_response
+
+    mock_response = _require_mock_data()
+    if mock_response:
+        return mock_response
 
     data = SummaryData(
         total_income=45000,
@@ -42,6 +60,10 @@ async def get_dashboard_monthly(request: Request):
     unauthorized_response = _require_auth(request)
     if unauthorized_response:
         return unauthorized_response
+
+    mock_response = _require_mock_data()
+    if mock_response:
+        return mock_response
 
     monthly_data = [
         MonthlyItem(month="2024-09", income=8000, expense=7200),
