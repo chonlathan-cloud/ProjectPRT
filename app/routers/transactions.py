@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Request, status
 from fastapi.responses import JSONResponse
 
+from app.core.security import decode_access_token
 from app.core.settings import settings
 from app.schemas.common import make_error_response, make_success_response
 from app.schemas.transactions import (
@@ -16,12 +17,25 @@ router = APIRouter(
 
 
 def _require_auth(request: Request):
-    if not request.headers.get("authorization"):
+    auth_header = request.headers.get("authorization")
+    if not auth_header or not auth_header.lower().startswith("bearer "):
         return JSONResponse(
             status_code=401,
             content=make_error_response(
                 code="UNAUTHORIZED",
                 message="Missing Authorization header",
+                details={},
+            ),
+        )
+    token = auth_header.split(" ", 1)[1].strip()
+    try:
+        decode_access_token(token)
+    except Exception:
+        return JSONResponse(
+            status_code=401,
+            content=make_error_response(
+                code="UNAUTHORIZED",
+                message="Invalid or expired token",
                 details={},
             ),
         )
