@@ -1,12 +1,18 @@
 from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
-from sqlalchemy import text # Import text here
+from sqlalchemy import text
+
+from app.core.settings import settings
 from app.db import get_db
 from app.deps import Role, has_role, get_current_user
 from app.routers.categories import router as categories_router
 from app.routers.cases import router as cases_router
-from app.routers.files import router as files_router # New import
-from app.routers.documents import router as documents_router # New import
+from app.routers.files import router as files_router
+from app.routers.documents import router as documents_router
+from app.routers.dashboard import router as dashboard_router
+from app.routers.transactions import router as transactions_router
+from app.routers.auth import router as auth_router
 
 app = FastAPI(
     title="PRT Software Accounting API",
@@ -14,16 +20,27 @@ app = FastAPI(
     version="0.1.0",
 )
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.CORS_ALLOW_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.include_router(categories_router)
 app.include_router(cases_router)
-app.include_router(files_router) # New router inclusion
-app.include_router(documents_router) # New router inclusion
+app.include_router(files_router)
+app.include_router(documents_router)
+app.include_router(dashboard_router)
+app.include_router(transactions_router)
+app.include_router(auth_router)
 
 @app.get("/healthz", tags=["Health Check"])
 async def health_check(db: Session = Depends(get_db)):
     try:
         # Try to execute a simple query to check database connectivity
-        db.execute(text("SELECT 1")) # Use text("SELECT 1")
+        db.execute(text("SELECT 1"))
         return {"status": "ok", "database": "connected"}
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"Database connection failed: {e}")
