@@ -9,7 +9,7 @@ from app.core.settings import settings
 from app.core.security import create_access_token
 from app.db import get_db
 from app.models import User, UserRole
-from app.rbac import ROLE_REQUESTER
+from app.rbac import ROLE_REQUESTER, ROLE_ADMIN
 from app.schemas.common import make_success_response, make_error_response
 from app.schemas.auth import (
     GoogleAuthRequest,
@@ -50,6 +50,13 @@ async def auth_google(payload: GoogleAuthRequest, db: Session = Depends(get_db))
 
     # Upsert user
     db_user = db.query(User).filter(User.google_sub == user_id).first()
+    is_first_user = db.query(User).count() == 0
+    make_admin = False
+    if is_first_user:
+        make_admin = True
+    if settings.BOOTSTRAP_ADMIN_SUB and settings.BOOTSTRAP_ADMIN_SUB == user_id:
+        make_admin = True
+
     if not db_user:
         db_user = User(
             id=uuid.uuid4(),
@@ -59,11 +66,15 @@ async def auth_google(payload: GoogleAuthRequest, db: Session = Depends(get_db))
         )
         db.add(db_user)
         db.flush()
-        default_role = UserRole(user_id=db_user.id, role=ROLE_REQUESTER)
+        default_role = UserRole(user_id=db_user.id, role=ROLE_ADMIN if make_admin else ROLE_REQUESTER)
         db.add(default_role)
     else:
         db_user.email = email
         db_user.name = name
+        if make_admin:
+            has_admin = db.query(UserRole).filter(UserRole.user_id == db_user.id, UserRole.role == ROLE_ADMIN).first()
+            if not has_admin:
+                db.add(UserRole(user_id=db_user.id, role=ROLE_ADMIN))
     db.commit()
     db.refresh(db_user)
 

@@ -50,5 +50,8 @@ class Settings(BaseSettings):
     SIGNED_URL_EXPIRATION_SECONDS: int = 900
     GOOGLE_APPLICATION_CREDENTIALS: str = ""
 
+    # Admin bootstrap
+    BOOTSTRAP_ADMIN_SUB: str = ""
+
 
 settings = Settings()
