@@ -10,6 +10,7 @@ from app.routers.documents import router as documents_router
 from app.routers.dashboard import router as dashboard_router
 from app.routers.transactions import router as transactions_router
 from app.routers.auth import router as auth_router
+from app.routers.admin import router as admin_router
 
 app = FastAPI(
     title="PRT Software Accounting API",
@@ -32,6 +33,7 @@ app.include_router(documents_router)
 app.include_router(dashboard_router)
 app.include_router(transactions_router)
 app.include_router(auth_router)
+app.include_router(admin_router)
 
 @app.get("/healthz", tags=["Health Check"])
 async def health_check():

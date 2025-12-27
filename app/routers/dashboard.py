@@ -5,7 +5,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.core.security import get_current_user_identity_from_header
+from app.rbac import require_roles, ROLE_ADMIN, ROLE_ACCOUNTANT, ROLE_VIEWER
 from app.db import get_db
 from app.models import TransactionV1
 from app.schemas.common import make_error_response, make_success_response
@@ -18,24 +18,9 @@ router = APIRouter(
 )
 
 
-def _authenticate(request: Request):
-    try:
-        identity = get_current_user_identity_from_header(request.headers.get("authorization"))
-        return identity, None
-    except Exception:
-        return None, JSONResponse(
-            status_code=401,
-            content=make_error_response(
-                code="UNAUTHORIZED",
-                message="Invalid or expired token",
-                details={},
-            ),
-        )
-
-
 @router.get("/summary", response_model=SummaryResponse)
 async def get_dashboard_summary(request: Request, db: Session = Depends(get_db)):
-    _, unauthorized_response = _authenticate(request)
+    _, unauthorized_response = require_roles(db, request, [ROLE_ADMIN, ROLE_ACCOUNTANT, ROLE_VIEWER])
     if unauthorized_response:
         return unauthorized_response
 
@@ -68,7 +53,7 @@ async def get_dashboard_summary(request: Request, db: Session = Depends(get_db))
 
 @router.get("/monthly", response_model=MonthlyResponse)
 async def get_dashboard_monthly(request: Request, db: Session = Depends(get_db)):
-    _, unauthorized_response = _authenticate(request)
+    _, unauthorized_response = require_roles(db, request, [ROLE_ADMIN, ROLE_ACCOUNTANT, ROLE_VIEWER])
     if unauthorized_response:
         return unauthorized_response
 

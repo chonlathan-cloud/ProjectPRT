@@ -4,10 +4,10 @@ from fastapi import APIRouter, Request, status, Depends
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
-from app.core.security import get_current_user_identity_from_header
 from app.core.settings import settings
 from app.db import get_db
 from app.models import TransactionV1
+from app.rbac import require_roles, ROLE_ADMIN, ROLE_ACCOUNTANT
 from app.schemas.common import make_error_response, make_success_response
 from app.schemas.transactions import (
     TransactionCreateRequest,
@@ -21,21 +21,6 @@ router = APIRouter(
 )
 
 
-def _authenticate(request: Request):
-    try:
-        identity = get_current_user_identity_from_header(request.headers.get("authorization"))
-        return identity, None
-    except Exception:
-        return None, JSONResponse(
-            status_code=401,
-            content=make_error_response(
-                code="UNAUTHORIZED",
-                message="Invalid or expired token",
-                details={},
-            ),
-        )
-
-
 @router.post(
     "",
     response_model=TransactionCreateResponse,
@@ -46,9 +31,9 @@ async def create_transaction(
     payload: TransactionCreateRequest,
     db: Session = Depends(get_db),
 ):
-    identity, unauthorized_response = _authenticate(request)
-    if unauthorized_response:
-        return unauthorized_response
+    user, auth_error = require_roles(db, request, [ROLE_ADMIN, ROLE_ACCOUNTANT])
+    if auth_error:
+        return auth_error
 
     if settings.USE_MOCK_DATA:
         data = TransactionCreateData(
@@ -86,7 +71,7 @@ async def create_transaction(
             amount=payload.amount,
             occurred_at=occurred_date,
             note=payload.note,
-            created_by=identity,
+            created_by=user.google_sub,
         )
         db.add(db_tx)
         db.commit()

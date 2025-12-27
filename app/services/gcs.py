@@ -1,6 +1,6 @@
 from datetime import timedelta
 from google.cloud import storage
-from app.settings import settings
+from app.core.settings import settings
 
 def _get_storage_client():
     # Authenticates using GOOGLE_APPLICATION_CREDENTIALS env var or metadata server

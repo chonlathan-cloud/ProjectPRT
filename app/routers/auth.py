@@ -1,10 +1,15 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
+from sqlalchemy.orm import Session
+import uuid
 
 from app.core.settings import settings
 from app.core.security import create_access_token
+from app.db import get_db
+from app.models import User, UserRole
+from app.rbac import ROLE_REQUESTER
 from app.schemas.common import make_success_response, make_error_response
 from app.schemas.auth import (
     GoogleAuthRequest,
@@ -20,7 +25,7 @@ router = APIRouter(
 
 
 @router.post("/google", response_model=GoogleAuthResponse)
-async def auth_google(payload: GoogleAuthRequest):
+async def auth_google(payload: GoogleAuthRequest, db: Session = Depends(get_db)):
     try:
         id_info = id_token.verify_oauth2_token(
             payload.id_token,
@@ -42,6 +47,25 @@ async def auth_google(payload: GoogleAuthRequest):
     user_id = id_info.get("sub")
     email = id_info.get("email")
     name = id_info.get("name") or email
+
+    # Upsert user
+    db_user = db.query(User).filter(User.google_sub == user_id).first()
+    if not db_user:
+        db_user = User(
+            id=uuid.uuid4(),
+            google_sub=user_id,
+            email=email,
+            name=name,
+        )
+        db.add(db_user)
+        db.flush()
+        default_role = UserRole(user_id=db_user.id, role=ROLE_REQUESTER)
+        db.add(default_role)
+    else:
+        db_user.email = email
+        db_user.name = name
+    db.commit()
+    db.refresh(db_user)
 
     access_token = create_access_token(sub=user_id, email=email, name=name)
 

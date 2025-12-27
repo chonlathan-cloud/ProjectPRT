@@ -1,6 +1,6 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from app.settings import settings
+from app.core.settings import settings
 from app.models import Base
 
 # pool_pre_ping/pool_recycle guard against dropped/stale connections causing OperationalError

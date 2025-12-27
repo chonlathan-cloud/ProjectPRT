@@ -44,8 +44,11 @@ class Settings(BaseSettings):
     # Google SSO
     GOOGLE_CLIENT_ID: str = ""
 
+    # GCS / storage
+    GOOGLE_CLOUD_PROJECT: str = ""
+    GCS_BUCKET_NAME: str = ""
+    SIGNED_URL_EXPIRATION_SECONDS: int = 900
+    GOOGLE_APPLICATION_CREDENTIALS: str = ""
+
 
 settings = Settings()
-
-if not settings.SECRET_KEY:
-    raise ValueError("SECRET_KEY must be set in .env")
