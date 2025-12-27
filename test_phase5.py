@@ -102,9 +102,9 @@ def run_test():
     r = requests.post(f"{BASE_URL}/api/v1/transactions", json=payload, headers=headers_req)
     print(f"   Status: {r.status_code}")
 
-    # 4. Admin assigns 'accountant' role to Requester
-    print("\n4️⃣  Admin assigning 'accountant' role to Requester")
-    role_payload = {"roles": ["requester", "accountant"]}
+    # 4. Admin assigns 'accounting' role to Requester
+    print("\n4️⃣  Admin assigning 'accounting' role to Requester")
+    role_payload = {"roles": ["requester", "accounting"]}
     r = requests.post(f"{BASE_URL}/api/v1/admin/users/{requester.id}/roles", json=role_payload, headers=headers_admin)
     print(f"   Status: {r.status_code}")
 
@@ -114,8 +114,8 @@ def run_test():
     if r.status_code == 200:
         roles = r.json()['data']['roles']
         print(f"   New Roles: {roles}")
-        if "accountant" in roles:
-            print("   ✅ Pass: Role 'accountant' found in DB")
+        if "accounting" in roles:
+            print("   ✅ Pass: Role 'accounting' found in DB")
         else:
             print("   ❌ Fail: Role not updated in DB response")
 

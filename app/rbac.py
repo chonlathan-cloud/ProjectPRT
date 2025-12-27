@@ -9,7 +9,7 @@ from app.models import User, UserRole
 from app.schemas.common import make_error_response
 
 ROLE_ADMIN = "admin"
-ROLE_ACCOUNTANT = "accountant"
+ROLE_ACCOUNTANT = "accounting"
 ROLE_REQUESTER = "requester"
 ROLE_VIEWER = "viewer"
 ALL_ROLES = {ROLE_ADMIN, ROLE_ACCOUNTANT, ROLE_REQUESTER, ROLE_VIEWER}
