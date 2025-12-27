@@ -1,8 +1,13 @@
-from fastapi import APIRouter, Request, status
-from fastapi.responses import JSONResponse
+from datetime import datetime
 
-from app.core.security import decode_access_token
+from fastapi import APIRouter, Request, status, Depends
+from fastapi.responses import JSONResponse
+from sqlalchemy.orm import Session
+
+from app.core.security import get_current_user_identity_from_header
 from app.core.settings import settings
+from app.db import get_db
+from app.models import TransactionV1
 from app.schemas.common import make_error_response, make_success_response
 from app.schemas.transactions import (
     TransactionCreateRequest,
@@ -16,22 +21,12 @@ router = APIRouter(
 )
 
 
-def _require_auth(request: Request):
-    auth_header = request.headers.get("authorization")
-    if not auth_header or not auth_header.lower().startswith("bearer "):
-        return JSONResponse(
-            status_code=401,
-            content=make_error_response(
-                code="UNAUTHORIZED",
-                message="Missing Authorization header",
-                details={},
-            ),
-        )
-    token = auth_header.split(" ", 1)[1].strip()
+def _authenticate(request: Request):
     try:
-        decode_access_token(token)
+        identity = get_current_user_identity_from_header(request.headers.get("authorization"))
+        return identity, None
     except Exception:
-        return JSONResponse(
+        return None, JSONResponse(
             status_code=401,
             content=make_error_response(
                 code="UNAUTHORIZED",
@@ -39,20 +34,6 @@ def _require_auth(request: Request):
                 details={},
             ),
         )
-    return None
-
-
-def _require_mock_data():
-    if not settings.USE_MOCK_DATA:
-        return JSONResponse(
-            status_code=501,
-            content=make_error_response(
-                code="NOT_IMPLEMENTED",
-                message="Mock data disabled for transaction endpoints",
-                details={},
-            ),
-        )
-    return None
 
 
 @router.post(
@@ -63,17 +44,66 @@ def _require_mock_data():
 async def create_transaction(
     request: Request,
     payload: TransactionCreateRequest,
+    db: Session = Depends(get_db),
 ):
-    unauthorized_response = _require_auth(request)
+    identity, unauthorized_response = _authenticate(request)
     if unauthorized_response:
         return unauthorized_response
 
-    mock_response = _require_mock_data()
-    if mock_response:
-        return mock_response
+    if settings.USE_MOCK_DATA:
+        data = TransactionCreateData(
+            transaction_id="tx_mock_0001",
+            status="created",
+        )
+        return make_success_response(data.model_dump())
+
+    if payload.type not in {"income", "expense"}:
+        return JSONResponse(
+            status_code=400,
+            content=make_error_response(
+                code="VALIDATION_ERROR",
+                message="Invalid transaction type",
+                details={"type": payload.type},
+            ),
+        )
+
+    try:
+        occurred_date = datetime.strptime(payload.occurred_at, "%Y-%m-%d").date()
+    except Exception:
+        return JSONResponse(
+            status_code=400,
+            content=make_error_response(
+                code="VALIDATION_ERROR",
+                message="Invalid occurred_at format, expected YYYY-MM-DD",
+                details={"occurred_at": payload.occurred_at},
+            ),
+        )
+
+    try:
+        db_tx = TransactionV1(
+            type=payload.type,
+            category=payload.category,
+            amount=payload.amount,
+            occurred_at=occurred_date,
+            note=payload.note,
+            created_by=identity,
+        )
+        db.add(db_tx)
+        db.commit()
+        db.refresh(db_tx)
+    except Exception:
+        db.rollback()
+        return JSONResponse(
+            status_code=500,
+            content=make_error_response(
+                code="INTERNAL_ERROR",
+                message="Failed to create transaction",
+                details={},
+            ),
+        )
 
     data = TransactionCreateData(
-        transaction_id="tx_mock_0001",
+        transaction_id=str(db_tx.id),
         status="created",
     )
     return make_success_response(data.model_dump())

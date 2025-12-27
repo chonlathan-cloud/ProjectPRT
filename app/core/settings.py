@@ -47,9 +47,5 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-# Basic runtime validation (avoid hardcoding secrets)
 if not settings.SECRET_KEY:
-    raise ValueError(
-        "SECRET_KEY must be set (recommended in .env at repo root). "
-        "Example: SECRET_KEY=change-me-dev"
-    )
+    raise ValueError("SECRET_KEY must be set in .env")
