@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
 from sqlalchemy.orm import Session
+from typing import Annotated
 import uuid
 
 from app.core.settings import settings
@@ -17,6 +18,7 @@ from app.schemas.auth import (
     GoogleUser,
     GoogleAuthResponse,
 )
+from app.deps import get_current_user, UserInDB
 
 router = APIRouter(
     prefix="/api/v1/auth",
@@ -89,3 +91,13 @@ async def auth_google(payload: GoogleAuthRequest, db: Session = Depends(get_db))
         ),
     )
     return make_success_response(data.model_dump())
+
+@router.get("/me")
+async def get_my_info(current_user: Annotated[UserInDB, Depends(get_current_user)]):
+    """
+    Get current user info and roles from token/database.
+    """
+    return make_success_response({
+        "username": current_user.username,
+        "roles": current_user.roles  # ระบบจะดึงจาก DB ล่าสุดผ่าน get_current_user
+    })
