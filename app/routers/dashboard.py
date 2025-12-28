@@ -1,15 +1,17 @@
-from datetime import date
-
-from fastapi import APIRouter, Request, Depends
-from fastapi.responses import JSONResponse
-from sqlalchemy import func
+from fastapi import APIRouter, Request, Depends, Query
 from sqlalchemy.orm import Session
+from sqlalchemy import func, desc
+from datetime import datetime, timedelta, date
+from typing import List
 
-from app.rbac import require_roles, ROLE_ADMIN, ROLE_ACCOUNTANT, ROLE_VIEWER
 from app.db import get_db
+from app.rbac import require_roles, ROLE_ADMIN, ROLE_ACCOUNTANT, ROLE_VIEWER
 from app.models import TransactionV1
-from app.schemas.common import make_error_response, make_success_response
-from app.schemas.dashboard import SummaryData, MonthlyItem, SummaryResponse, MonthlyResponse
+from app.schemas.common import make_success_response
+from app.schemas.dashboard import (
+    DashboardResponse, DashboardData, SummaryData, 
+    MonthlyData, ActivityData, TransactionItem
+)
 from app.core.settings import settings
 
 router = APIRouter(
@@ -17,100 +19,115 @@ router = APIRouter(
     tags=["Dashboard"],
 )
 
+@router.get("", response_model=DashboardResponse)
+async def get_full_dashboard(
+    request: Request, 
+    year: int = Query(default=datetime.now().year),
+    db: Session = Depends(get_db)
+):
+    # 1. Check Permissions
+    _, auth_error = require_roles(db, request, [ROLE_ADMIN, ROLE_ACCOUNTANT, ROLE_VIEWER])
+    if auth_error:
+        return auth_error
 
-@router.get("/summary", response_model=SummaryResponse)
-async def get_dashboard_summary(request: Request, db: Session = Depends(get_db)):
-    _, unauthorized_response = require_roles(db, request, [ROLE_ADMIN, ROLE_ACCOUNTANT, ROLE_VIEWER])
-    if unauthorized_response:
-        return unauthorized_response
-
+    # 2. Mock Data (ถ้าเปิดใช้)
     if settings.USE_MOCK_DATA:
-        data = SummaryData(
-            total_income=45000,
-            total_expense=34567,
-            balance=10433,
-        )
-        return make_success_response(data.model_dump())
+        return make_success_response({
+            "summary": {"expenses": 34567, "income": 45000, "balance": 10433},
+            "monthlyStats": [
+                {"name": "Jan", "value": 4000},
+                {"name": "Feb", "value": 3000},
+                {"name": "Mar", "value": 2000},
+                {"name": "Apr", "value": 2780},
+                {"name": "May", "value": 1890},
+                {"name": "Jun", "value": 2390},
+            ],
+            "activityStats": [
+                {"name": "Shopping", "value": 400, "fill": "#8884d8"},
+                {"name": "Food", "value": 300, "fill": "#82ca9d"},
+                {"name": "Rent", "value": 300, "fill": "#ffc658"},
+            ],
+            "latestTransactions": [
+                {"id": "1", "initial": "S", "name": "Shopping", "description": "Buy clothes", "amount": 2500},
+                {"id": "2", "initial": "F", "name": "Food", "description": "Dinner", "amount": 500},
+            ]
+        })
 
-    try:
-        income_sum = db.query(func.coalesce(func.sum(TransactionV1.amount), 0)).filter(TransactionV1.type == "income").scalar()
-        expense_sum = db.query(func.coalesce(func.sum(TransactionV1.amount), 0)).filter(TransactionV1.type == "expense").scalar()
-        income = float(income_sum or 0)
-        expense = float(expense_sum or 0)
-        balance = income - expense
-        data = SummaryData(total_income=income, total_expense=expense, balance=balance)
-        return make_success_response(data.model_dump())
-    except Exception:
-        return JSONResponse(
-            status_code=500,
-            content=make_error_response(
-                code="INTERNAL_ERROR",
-                message="Failed to compute summary",
-                details={},
-            ),
-        )
+    # 3. Real Data Query (จาก TransactionV1)
+    
+    # A. Summary (Total for the selected year)
+    start_date = date(year, 1, 1)
+    end_date = date(year, 12, 31)
+    
+    income_sum = db.query(func.sum(TransactionV1.amount)).filter(
+        TransactionV1.type == "income",
+        TransactionV1.occurred_at >= start_date,
+        TransactionV1.occurred_at <= end_date
+    ).scalar() or 0
+    
+    expense_sum = db.query(func.sum(TransactionV1.amount)).filter(
+        TransactionV1.type == "expense",
+        TransactionV1.occurred_at >= start_date,
+        TransactionV1.occurred_at <= end_date
+    ).scalar() or 0
+    
+    balance = float(income_sum) - float(expense_sum)
 
+    # B. Monthly Stats (Income vs Expense? หรือแค่ Expense ตามกราฟเดิม?)
+    # สมมติกราฟโชว์ Expense รายเดือน
+    monthly_stats = []
+    months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    for i, m_name in enumerate(months):
+        m_start = date(year, i + 1, 1)
+        if i == 11:
+            m_end = date(year + 1, 1, 1)
+        else:
+            m_end = date(year, i + 2, 1)
+            
+        val = db.query(func.sum(TransactionV1.amount)).filter(
+            TransactionV1.type == "expense", # โชว์รายจ่ายในกราฟ
+            TransactionV1.occurred_at >= m_start,
+            TransactionV1.occurred_at < m_end
+        ).scalar() or 0
+        
+        monthly_stats.append(MonthlyData(name=m_name, value=float(val)))
 
-@router.get("/monthly", response_model=MonthlyResponse)
-async def get_dashboard_monthly(request: Request, db: Session = Depends(get_db)):
-    _, unauthorized_response = require_roles(db, request, [ROLE_ADMIN, ROLE_ACCOUNTANT, ROLE_VIEWER])
-    if unauthorized_response:
-        return unauthorized_response
+    # C. Activity Stats (Expenses grouped by Category)
+    activities = db.query(
+        TransactionV1.category, func.sum(TransactionV1.amount)
+    ).filter(
+        TransactionV1.type == "expense",
+        TransactionV1.occurred_at >= start_date,
+        TransactionV1.occurred_at <= end_date
+    ).group_by(TransactionV1.category).all()
+    
+    colors = ["#8884d8", "#82ca9d", "#ffc658", "#ff8042", "#0088fe", "#00C49F"]
+    activity_stats = []
+    for i, (cat, val) in enumerate(activities):
+        activity_stats.append(ActivityData(
+            name=cat, 
+            value=float(val), 
+            fill=colors[i % len(colors)]
+        ))
 
-    if settings.USE_MOCK_DATA:
-        monthly_data = [
-            MonthlyItem(month="2024-09", income=8000, expense=7200),
-            MonthlyItem(month="2024-10", income=8500, expense=7300),
-            MonthlyItem(month="2024-11", income=7600, expense=6400),
-            MonthlyItem(month="2024-12", income=9000, expense=7800),
-            MonthlyItem(month="2025-01", income=8800, expense=7100),
-            MonthlyItem(month="2025-02", income=9100, expense=6767),
-        ]
-        return make_success_response([item.model_dump() for item in monthly_data])
+    # D. Latest Transactions
+    latest_txs = db.query(TransactionV1).order_by(
+        TransactionV1.occurred_at.desc(), TransactionV1.created_at.desc()
+    ).limit(5).all()
+    
+    tx_list = []
+    for tx in latest_txs:
+        tx_list.append(TransactionItem(
+            id=str(tx.id),
+            initial=tx.category[0].upper() if tx.category else "?",
+            name=tx.category,
+            description=tx.note or tx.occurred_at.strftime("%Y-%m-%d"),
+            amount=float(tx.amount)
+        ))
 
-    try:
-        today = date.today()
-
-        def month_start(base_date: date, offset_months: int) -> date:
-            total_months = base_date.year * 12 + base_date.month - 1 + offset_months
-            year = total_months // 12
-            month = total_months % 12 + 1
-            return date(year, month, 1)
-
-        results = []
-        for offset in range(-5, 1):  # last 6 months including current
-            start = month_start(today, offset)
-            next_start = month_start(today, offset + 1)
-
-            income_sum = (
-                db.query(func.coalesce(func.sum(TransactionV1.amount), 0))
-                .filter(TransactionV1.type == "income")
-                .filter(TransactionV1.occurred_at >= start)
-                .filter(TransactionV1.occurred_at < next_start)
-                .scalar()
-            )
-            expense_sum = (
-                db.query(func.coalesce(func.sum(TransactionV1.amount), 0))
-                .filter(TransactionV1.type == "expense")
-                .filter(TransactionV1.occurred_at >= start)
-                .filter(TransactionV1.occurred_at < next_start)
-                .scalar()
-            )
-            results.append(
-                MonthlyItem(
-                    month=start.strftime("%Y-%m"),
-                    income=float(income_sum or 0),
-                    expense=float(expense_sum or 0),
-                )
-            )
-
-        return make_success_response([item.model_dump() for item in results])
-    except Exception:
-        return JSONResponse(
-            status_code=500,
-            content=make_error_response(
-                code="INTERNAL_ERROR",
-                message="Failed to compute monthly data",
-                details={},
-            ),
-        )
+    return make_success_response({
+        "summary": {"expenses": float(expense_sum), "income": float(income_sum), "balance": balance},
+        "monthlyStats": monthly_stats,
+        "activityStats": activity_stats,
+        "latestTransactions": tx_list
+    })
