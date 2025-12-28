@@ -5,7 +5,7 @@ from app.schemas.common import ResponseEnvelope
 class SummaryData(BaseModel):
     expenses: float
     income: float
-    balance: number
+    balance: float
 
 class MonthlyData(BaseModel):
     name: str
