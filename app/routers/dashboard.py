@@ -113,7 +113,9 @@ async def get_full_dashboard(
     # D. Latest Transactions
     latest_txs = db.query(TransactionV1).order_by(
         TransactionV1.occurred_at.desc(), TransactionV1.created_at.desc()
-    ).limit(5).all()
+        TransactionV1.occurred_at.desc(), 
+        TransactionV1.created_at.desc()
+    ).limit(10).all()
     
     tx_list = []
     for tx in latest_txs:

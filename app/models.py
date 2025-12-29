@@ -13,6 +13,7 @@ class CategoryType(enum.Enum):
     # spec: categories.type
     EXPENSE = "EXPENSE"
     REVENUE = "REVENUE"
+    ASSET = "ASSET" # Added for future use
 
 class FundingType(enum.Enum):
     # spec: cases.funding_type

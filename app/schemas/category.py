@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, ConfigDict
 class CategoryType(str, Enum):
     EXPENSE = "EXPENSE"
     REVENUE = "REVENUE"
+    ASSET = "ASSET"
 
 class CategoryBase(BaseModel):
     name_th: str = Field(..., max_length=100)

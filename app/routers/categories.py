@@ -12,7 +12,7 @@ from app.schemas.category import CategoryCreate, CategoryUpdate, CategoryRespons
 from app.services.audit import log_audit_event
 
 router = APIRouter(
-    prefix="/api/categories",
+    prefix="/api/v1/categories",
     tags=["Categories"]
 )
 
