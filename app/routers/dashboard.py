@@ -111,7 +111,10 @@ async def get_full_dashboard(
         ))
 
     # D. Latest Transactions
-    latest_txs = db.query(TransactionV1).order_by(
+    latest_txs = db.query(TransactionV1).filter(
+        TransactionV1.occurred_at >= start_date,  # กรองตั้งแต่วันแรกของปี
+        TransactionV1.occurred_at <= end_date     # ถึงวันสุดท้ายของปี
+    ).order_by(
         TransactionV1.occurred_at.desc(),
         TransactionV1.created_at.desc()
     ).limit(5).all()
