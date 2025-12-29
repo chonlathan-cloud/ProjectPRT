@@ -58,7 +58,7 @@ gcloud run deploy $SERVICE_NAME \
   --set-env-vars "DATABASE_URL=$DB_URL" \
   --set-env-vars "USE_MOCK_DATA=false" \
   --set-env-vars "GCS_BUCKET_NAME=acct-doce-dev" \
-  --set-env-vars "TOKEN_SECRET=prt-secret-key-2025" \
+  --set-env-vars "SECRET_KEY=prt-secret-key-2025" \
   --port 8080
 
 echo "========================================================"
