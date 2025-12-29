@@ -1,7 +1,44 @@
-.git
+
 .nenv
 __pycache__
 *.pyc
 .env
-.DS_Store
 deploy.sh
+# --- System & Git ---
+.git/
+.gitignore
+.DS_Store
+
+# --- Python & Environment (สำคัญมาก!) ---
+# ห้ามเอา Virtual Env ขึ้นไปเด็ดขาด เพราะ OS ไม่เหมือนกัน
+.nenv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# --- Configuration & Secrets ---
+# ปกติเราจะตั้งค่า Environment Variables ใน Cloud Run Console แทนการอัปโหลดไฟล์นี้
+.env
+
+# --- Testing & Documentation ---
+# ไฟล์พวกนี้ไม่จำเป็นสำหรับ Runtime
+specs/
+.specify/
+tests/
+test_*.py
+pytest_cache/
+.pytest_cache/
+
+# --- Seed Scripts & Data ---
+# ถ้าคุณต้องการเก็บไว้รันบน Cloud ให้เอา # ออก
+# แต่ถ้าใช้แค่ตอน Initial แนะนำให้ Ignore เพื่อความสะอาดของ Image
+# seed_*.py 
+
+# --- Local Artifacts (ไฟล์ขยะจากการเทส) ---
+*.pdf
+*.log
+*.sqlite
+*.db
