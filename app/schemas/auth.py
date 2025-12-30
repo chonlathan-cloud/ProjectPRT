@@ -1,5 +1,4 @@
-from dataclasses import Field
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 from app.schemas.common import ResponseEnvelope
 
 

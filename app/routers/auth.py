@@ -20,6 +20,7 @@ from app.schemas.auth import (
     GoogleAuthResponse,
     UserSignupRequest,
     UserLoginRequest,
+    UserAuthResponse,   
 )
 from app.deps import get_current_user, UserInDB
 
