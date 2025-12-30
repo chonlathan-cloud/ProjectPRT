@@ -1,3 +1,4 @@
+from dataclasses import Field
 from pydantic import BaseModel, EmailStr
 from app.schemas.common import ResponseEnvelope
 
@@ -18,4 +19,17 @@ class GoogleAuthData(BaseModel):
 
 
 class GoogleAuthResponse(ResponseEnvelope):
+    data: GoogleAuthData
+
+class UserSignupRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(..., min_length=6)
+    name: str
+
+class UserLoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+class UserAuthResponse(ResponseEnvelope):
+    #ใช้ Structure เดี่ยวกับ GoogleAuthResponse
     data: GoogleAuthData

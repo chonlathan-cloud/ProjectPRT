@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from typing import Annotated
 import uuid
 
+from app.core.hashing import Hasher
 from app.core.settings import settings
 from app.core.security import create_access_token
 from app.db import get_db
@@ -17,6 +18,8 @@ from app.schemas.auth import (
     GoogleAuthData,
     GoogleUser,
     GoogleAuthResponse,
+    UserSignupRequest,
+    UserLoginRequest,
 )
 from app.deps import get_current_user, UserInDB
 
@@ -24,6 +27,72 @@ router = APIRouter(
     prefix="/api/v1/auth",
     tags=["Auth"],
 )
+
+
+# --- 1. SIGN UP ENDPOINT ---
+@router.post("/signup", response_model=UserAuthResponse)
+async def signup(payload: UserSignupRequest, db: Session = Depends(get_db)):
+    # เช็คว่า Email ซ้ำไหม
+    existing_user = db.query(User).filter(User.email == payload.email).first()
+    if existing_user:
+        return JSONResponse(
+            status_code=400,
+            content=make_error_response(
+                code="DUPLICATE_EMAIL",
+                message="Email already registered"
+            )
+        )
+
+    # สร้าง User ใหม่ พร้อม Hash Password
+    new_user = User(
+        id=uuid.uuid4(),
+        email=payload.email,
+        name=payload.name,
+        hashed_password=Hasher.get_password_hash(payload.password),
+        # google_sub เป็น None
+    )
+    db.add(new_user)
+    db.flush()
+
+    # Default Role (ให้เป็น Requester ไปก่อน)
+    db.add(UserRole(user_id=new_user.id, role=ROLE_REQUESTER))
+    
+    db.commit()
+    db.refresh(new_user)
+
+    # Auto-login: สร้าง Token ส่งกลับไปเลย
+    access_token = create_access_token(sub=str(new_user.id), email=new_user.email, name=new_user.name)
+    
+    data = GoogleAuthData(
+        access_token=access_token,
+        user=GoogleUser(user_id=str(new_user.id), email=new_user.email, name=new_user.name)
+    )
+    return make_success_response(data.model_dump())
+
+# --- 2. LOGIN ENDPOINT ---
+@router.post("/login", response_model=UserAuthResponse)
+async def login(payload: UserLoginRequest, db: Session = Depends(get_db)):
+    # หา User จาก Email
+    user = db.query(User).filter(User.email == payload.email).first()
+    
+    # เช็ค Password
+    if not user or not user.hashed_password or not Hasher.verify_password(payload.password, user.hashed_password):
+        return JSONResponse(
+            status_code=401,
+            content=make_error_response(
+                code="UNAUTHORIZED",
+                message="Invalid email or password"
+            )
+        )
+
+    # สร้าง Token
+    access_token = create_access_token(sub=str(user.id), email=user.email, name=user.name)
+
+    data = GoogleAuthData(
+        access_token=access_token,
+        user=GoogleUser(user_id=str(user.id), email=user.email, name=user.name)
+    )
+    return make_success_response(data.model_dump())
 
 
 @router.post("/google", response_model=GoogleAuthResponse)

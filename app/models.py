@@ -207,11 +207,14 @@ class User(Base):
     __tablename__ = "users"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    google_sub = Column(String, nullable=False, unique=True)
-    email = Column(String, nullable=True)
+    google_sub = Column(String, nullable=True, unique=True)
+    # บังคับ Email.แทน
+    email = Column(String, nullable=True, unique=True)
     name = Column(String, nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    # เพิ่มช่องเก็บรหัสผ่าน (hashed)
+    hashed_password = Column(String, nullable=True)
 
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     roles = relationship("UserRole", back_populates="user", cascade="all, delete-orphan")
 
 
