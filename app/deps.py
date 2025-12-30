@@ -43,14 +43,14 @@ async def get_current_user(
     # 1. Decode JWT Token
     try:
         payload = decode_access_token(token)
-        google_sub: str = payload.get("sub")
-        if google_sub is None:
+        token_sub: str = payload.get("sub")
+        if token_sub is None:
             raise credentials_exception
     except Exception:
         raise credentials_exception
 
     # 2. Fetch User from DB
-    user = db.execute(select(User).filter_by(google_sub=google_sub)).scalar_one_or_none()
+    user = db.execute(select(User).filter(User.id == token_sub)).scalar_one_or_none()
     if user is None:
         raise credentials_exception
 
