@@ -7,6 +7,12 @@ from pydantic import BaseModel, Field, ConfigDict
 
 from app.models import AttachmentType # Import from app.models
 
+class FileUploadResponse(BaseModel):
+    id: UUID
+    case_id: UUID
+    file_name: str
+    url: str
+    type: AttachmentType
 
 class SignedUrlPurpose(str, Enum):
     UPLOAD = "UPLOAD"
