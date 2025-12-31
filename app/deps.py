@@ -65,8 +65,10 @@ async def get_current_user(
         except ValueError:
             pass # Ignore invalid roles in DB
 
-    # --- แก้ไขตรงนี้: ถ้า google_sub เป็น None ให้ใช้ email แทน ---
-    username_val = user.google_sub if user.google_sub else user.email
+    # --- แก้ไขตรงนี้: เพิ่ม fallback ถ้า google_sub และ email เป็น None ให้ใช้ id แทน ---
+    # ใช้ค่าแรกที่ไม่ใช่ว่าง: google_sub -> email -> user.id
+    username_val = user.google_sub or user.email or str(user.id)
+    
     return UserInDB(username=username_val, roles=roles_enum, id=str(user.id))
 
 

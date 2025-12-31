@@ -26,7 +26,7 @@ router = APIRouter(
     tags=["Cases"]
 )
 
-# ... (ฟังก์ชัน generate_case_no, _generate_document_no, _calculate_variance_info, _ensure_case_visibility เหมือนเดิม)
+# ... (Helper functions keep the same) ...
 def generate_case_no() -> str:
     today_str = datetime.now(timezone.utc).strftime("%y%m%d")
     unique_suffix = uuid.uuid4().hex[:6].upper()
@@ -35,6 +35,8 @@ def generate_case_no() -> str:
 def _generate_document_no(db: Session, doc_prefix_enum: DocumentType) -> str:
     doc_prefix = doc_prefix_enum.value
     current_ym = datetime.now(timezone.utc).strftime("%y%m")
+    
+    # Check current counter
     doc_counter = db.execute(
         select(DocCounter).filter_by(doc_prefix=doc_prefix, year_month=current_ym).with_for_update()
     ).scalar_one_or_none()
@@ -53,7 +55,6 @@ async def _calculate_variance_info(db: Session, case_id: UUID) -> dict:
     cr_document = db.execute(select(Document).filter_by(case_id=case_id, doc_type=DocumentType.CR)).scalar_one_or_none()
     db_document = db.execute(select(Document).filter_by(case_id=case_id, doc_type=DocumentType.DB)).scalar_one_or_none()
     
-    # Helper: Return default/zero if docs missing (for safety)
     if not cr_document or not db_document:
          return {
             "cr_amount": decimal.Decimal(0),
@@ -92,7 +93,8 @@ def _ensure_case_visibility(db_case: Case, current_user: UserInDB) -> None:
     if not can_see_all and db_case.requester_id != current_user.username:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to view this case.")
 
-# ... (create_case เหมือนเดิม)
+# --- Endpoints ---
+
 @router.post("/", response_model=CaseResponse, status_code=status.HTTP_201_CREATED)
 async def create_case(
     payload: CaseCreate,
@@ -107,6 +109,8 @@ async def create_case(
 
     account_code = category.account_code
     case_no = generate_case_no()
+    
+    # Ensure uniqueness (simple check)
     while db.execute(select(Case).filter_by(case_no=case_no)).scalar_one_or_none():
         case_no = generate_case_no()
 
@@ -133,132 +137,129 @@ async def create_case(
     return CaseResponse.model_validate(db_case)
 
 
-# --- 1. แก้ไข: Submit Case ให้สร้าง PS Document เลย ---
 @router.post("/{case_id}/submit", response_model=WorkflowResponse)
 async def submit_case(
     case_id: UUID,
     current_user: Annotated[UserInDB, Depends(has_role([Role.REQUESTER]))],
     db: Session = Depends(get_db)
 ):
-    with db.begin(): # ใช้ Transaction
-        db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
-        if not db_case:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found.")
+    # REMOVED: with db.begin() -> causing double transaction error
+    db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
+    if not db_case:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found.")
 
-        if db_case.requester_id != current_user.username:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to submit this case.")
+    if db_case.requester_id != current_user.username:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to submit this case.")
 
-        if db_case.status != CaseStatus.DRAFT:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Only DRAFT cases can be submitted.")
+    if db_case.status != CaseStatus.DRAFT:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Only DRAFT cases can be submitted.")
 
-        # --- A. สร้างเลข PS ทันที ---
-        ps_doc_no = _generate_document_no(db, DocumentType.PS)
-        
-        # --- B. สร้าง Document Record ---
-        # Note: pdf_uri เราใส่ placeholder ไปก่อน เพราะเดี๋ยว Frontend จะ Generate PDF เองแล้วส่งมาเก็บ (ถ้าต้องการ) 
-        # หรือถ้าระบบหลังบ้านเจน ก็จะเป็นอีก Step
-        db_document = Document(
-            case_id=case_id,
-            doc_type=DocumentType.PS,
-            doc_no=ps_doc_no,
-            amount=db_case.requested_amount,
-            pdf_uri="generated_by_frontend", 
-            created_by=current_user.username
-        )
-        db.add(db_document)
+    # --- A. สร้างเลข PS ทันที ---
+    ps_doc_no = _generate_document_no(db, DocumentType.PS)
+    
+    # --- B. สร้าง Document Record ---
+    db_document = Document(
+        case_id=case_id,
+        doc_type=DocumentType.PS,
+        doc_no=ps_doc_no,
+        amount=db_case.requested_amount,
+        pdf_uri="generated_by_frontend", 
+        created_by=current_user.username
+    )
+    db.add(db_document)
 
-        # --- C. อัปเดตสถานะ ---
-        old_status = db_case.status
-        db_case.status = CaseStatus.SUBMITTED
-        db_case.updated_by = current_user.username
-        db_case.updated_at = datetime.now(timezone.utc)
-        
-        db.flush()
+    # --- C. อัปเดตสถานะ ---
+    old_status = db_case.status
+    db_case.status = CaseStatus.SUBMITTED
+    db_case.updated_by = current_user.username
+    db_case.updated_at = datetime.now(timezone.utc)
+    
+    db.flush()
 
-        log_audit_event(
-            db, "case", db_case.id, "submit", current_user.username,
-            {"old_status": old_status.value, "new_status": db_case.status.value, "ps_doc_no": ps_doc_no}
-        )
+    log_audit_event(
+        db, "case", db_case.id, "submit", current_user.username,
+        {"old_status": old_status.value, "new_status": db_case.status.value, "ps_doc_no": ps_doc_no}
+    )
 
-        return WorkflowResponse(
-            message=f"Case {db_case.case_no} submitted. PS Document {ps_doc_no} generated.",
-            case_id=str(db_case.id),
-            status=db_case.status.value,
-            doc_no=ps_doc_no, # ส่งเลขเอกสารกลับไปให้ Frontend
-            audit_details={"ps_doc_no": ps_doc_no}
-        )
+    db.commit() # Explicit commit
 
-# --- 2. แก้ไข: Approve Case ไม่ต้องสร้างเลข PS ซ้ำ ---
+    return WorkflowResponse(
+        message=f"Case {db_case.case_no} submitted. PS Document {ps_doc_no} generated.",
+        case_id=str(db_case.id),
+        status=db_case.status.value,
+        doc_no=ps_doc_no, 
+        audit_details={"ps_doc_no": ps_doc_no}
+    )
+
 @router.post("/{case_id}/ps/approve", response_model=WorkflowResponse)
 async def ps_approve_case(
     case_id: UUID,
     current_user: Annotated[UserInDB, Depends(has_role([Role.FINANCE, Role.ADMIN]))],
     db: Session = Depends(get_db)
 ):
-    with db.begin():
-        db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
-        if not db_case:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found.")
+    # REMOVED: with db.begin()
+    db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
+    if not db_case:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found.")
 
-        if db_case.status != CaseStatus.SUBMITTED:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Case status must be SUBMITTED.")
+    if db_case.status != CaseStatus.SUBMITTED:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Case status must be SUBMITTED.")
 
-        # หาเลข PS เดิมที่สร้างตอน Submit
-        existing_ps_doc = db.execute(
-            select(Document).filter_by(case_id=case_id, doc_type=DocumentType.PS)
-        ).scalar_one_or_none()
-        
-        # ถ้าไม่มี (เช่น เคสเก่า) ค่อยสร้างใหม่ แต่ปกติควรมีแล้ว
-        ps_doc_no = existing_ps_doc.doc_no if existing_ps_doc else _generate_document_no(db, DocumentType.PS)
-        
-        # Update status
-        old_status = db_case.status
-        db_case.status = CaseStatus.PS_APPROVED
-        db_case.updated_by = current_user.username
-        db_case.updated_at = datetime.now(timezone.utc)
+    # Find existing PS doc
+    existing_ps_doc = db.execute(
+        select(Document).filter_by(case_id=case_id, doc_type=DocumentType.PS)
+    ).scalar_one_or_none()
+    
+    ps_doc_no = existing_ps_doc.doc_no if existing_ps_doc else _generate_document_no(db, DocumentType.PS)
+    
+    old_status = db_case.status
+    db_case.status = CaseStatus.PS_APPROVED
+    db_case.updated_by = current_user.username
+    db_case.updated_at = datetime.now(timezone.utc)
 
-        db.flush()
+    db.flush()
 
-        log_audit_event(
-            db, "case", db_case.id, "ps_approve", current_user.username,
-            {"old_status": old_status.value, "new_status": db_case.status.value}
-        )
-        
-        return WorkflowResponse(
-            message=f"Case {db_case.case_no} PS approved.",
-            case_id=str(db_case.id),
-            status=db_case.status.value,
-            doc_no=ps_doc_no,
-            audit_details={}
-        )
+    log_audit_event(
+        db, "case", db_case.id, "ps_approve", current_user.username,
+        {"old_status": old_status.value, "new_status": db_case.status.value}
+    )
+    
+    db.commit()
 
-# ... (cr_issue_case, record_payment_for_case, submit_settlement_for_case, db_issue_case และอื่นๆ เหมือนเดิมได้เลยครับ)
+    return WorkflowResponse(
+        message=f"Case {db_case.case_no} PS approved.",
+        case_id=str(db_case.id),
+        status=db_case.status.value,
+        doc_no=ps_doc_no,
+        audit_details={}
+    )
+
 @router.post("/{case_id}/cr/issue", response_model=WorkflowResponse)
 async def cr_issue_case(
     case_id: UUID,
     current_user: Annotated[UserInDB, Depends(has_role([Role.ACCOUNTING, Role.ADMIN]))],
     db: Session = Depends(get_db)
 ):
-    with db.begin():
-        db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
-        if not db_case: raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found.")
-        if db_case.status != CaseStatus.PS_APPROVED:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Status must be PS_APPROVED.")
-        
-        if db.execute(select(Document).filter_by(case_id=case_id, doc_type=DocumentType.CR)).scalar_one_or_none():
-             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"CR already exists.")
+    # REMOVED: with db.begin()
+    db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
+    if not db_case: raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found.")
+    if db_case.status != CaseStatus.PS_APPROVED:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Status must be PS_APPROVED.")
+    
+    if db.execute(select(Document).filter_by(case_id=case_id, doc_type=DocumentType.CR)).scalar_one_or_none():
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"CR already exists.")
 
-        cr_doc_no = _generate_document_no(db, DocumentType.CR)
-        # Placeholder PDF URI
-        db_cr = Document(case_id=case_id, doc_type=DocumentType.CR, doc_no=cr_doc_no, amount=db_case.requested_amount, pdf_uri="generated_by_backend", created_by=current_user.username)
-        db.add(db_cr)
-        
-        old_s = db_case.status
-        db_case.status = CaseStatus.CR_ISSUED
-        db.flush()
-        log_audit_event(db, "case", case_id, "cr_issue", current_user.username, {"old": old_s.value, "new": db_case.status.value, "doc": cr_doc_no})
-        
-        return WorkflowResponse(message="CR Issued", case_id=str(case_id), status=db_case.status.value, doc_no=cr_doc_no)
+    cr_doc_no = _generate_document_no(db, DocumentType.CR)
+    db_cr = Document(case_id=case_id, doc_type=DocumentType.CR, doc_no=cr_doc_no, amount=db_case.requested_amount, pdf_uri="generated_by_backend", created_by=current_user.username)
+    db.add(db_cr)
+    
+    old_s = db_case.status
+    db_case.status = CaseStatus.CR_ISSUED
+    db.flush()
+    log_audit_event(db, "case", case_id, "cr_issue", current_user.username, {"old": old_s.value, "new": db_case.status.value, "doc": cr_doc_no})
+    
+    db.commit()
+    return WorkflowResponse(message="CR Issued", case_id=str(case_id), status=db_case.status.value, doc_no=cr_doc_no)
 
 @router.post("/{case_id}/payment", response_model=WorkflowResponse)
 async def record_payment_for_case(
@@ -266,21 +267,23 @@ async def record_payment_for_case(
     current_user: Annotated[UserInDB, Depends(has_role([Role.TREASURY, Role.ADMIN]))],
     db: Session = Depends(get_db)
 ):
-    with db.begin():
-        db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
-        if not db_case: raise HTTPException(status_code=404, detail="Case not found")
-        if db_case.status != CaseStatus.CR_ISSUED: raise HTTPException(status_code=409, detail="Must be CR_ISSUED")
-        
-        cr_doc = db.execute(select(Document).filter_by(case_id=case_id, doc_type=DocumentType.CR)).scalar_one_or_none()
-        if not cr_doc: raise HTTPException(status_code=404, detail="CR doc missing")
+    # REMOVED: with db.begin()
+    db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
+    if not db_case: raise HTTPException(status_code=404, detail="Case not found")
+    if db_case.status != CaseStatus.CR_ISSUED: raise HTTPException(status_code=409, detail="Must be CR_ISSUED")
+    
+    cr_doc = db.execute(select(Document).filter_by(case_id=case_id, doc_type=DocumentType.CR)).scalar_one_or_none()
+    if not cr_doc: raise HTTPException(status_code=404, detail="CR doc missing")
 
-        db_pay = Payment(case_id=case_id, type=PaymentType.DISBURSE, amount=cr_doc.amount, paid_by=current_user.username, paid_at=datetime.now(timezone.utc), reference_no=payment_in.reference_no)
-        db.add(db_pay)
-        
-        db_case.status = CaseStatus.PAID
-        db.flush()
-        log_audit_event(db, "case", case_id, "payment", current_user.username, {"amount": float(cr_doc.amount)})
-        return WorkflowResponse(message="Payment Recorded", case_id=str(case_id), status="PAID")
+    db_pay = Payment(case_id=case_id, type=PaymentType.DISBURSE, amount=cr_doc.amount, paid_by=current_user.username, paid_at=datetime.now(timezone.utc), reference_no=payment_in.reference_no)
+    db.add(db_pay)
+    
+    db_case.status = CaseStatus.PAID
+    db.flush()
+    log_audit_event(db, "case", case_id, "payment", current_user.username, {"amount": float(cr_doc.amount)})
+    
+    db.commit()
+    return WorkflowResponse(message="Payment Recorded", case_id=str(case_id), status="PAID")
 
 @router.post("/{case_id}/settlement/submit", response_model=WorkflowResponse)
 async def submit_settlement_for_case(
@@ -288,17 +291,18 @@ async def submit_settlement_for_case(
     current_user: Annotated[UserInDB, Depends(has_role([Role.REQUESTER]))],
     db: Session = Depends(get_db)
 ):
-    with db.begin():
-        db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
-        if not db_case: raise HTTPException(404, "Case not found")
-        if db_case.status != CaseStatus.PAID: raise HTTPException(409, "Must be PAID")
-        if db_case.requester_id != current_user.username: raise HTTPException(403, "Not owner")
+    # REMOVED: with db.begin()
+    db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
+    if not db_case: raise HTTPException(404, "Case not found")
+    if db_case.status != CaseStatus.PAID: raise HTTPException(409, "Must be PAID")
+    if db_case.requester_id != current_user.username: raise HTTPException(403, "Not owner")
 
-        db_case.status = CaseStatus.SETTLEMENT_SUBMITTED
-        db.flush()
-        # Log actual amount for DB issuance later
-        log_audit_event(db, "case", case_id, "settlement_submit", current_user.username, {"actual_amount": float(settlement_in.actual_amount)})
-        return WorkflowResponse(message="Settlement Submitted", case_id=str(case_id), status="SETTLEMENT_SUBMITTED")
+    db_case.status = CaseStatus.SETTLEMENT_SUBMITTED
+    db.flush()
+    log_audit_event(db, "case", case_id, "settlement_submit", current_user.username, {"actual_amount": float(settlement_in.actual_amount)})
+    
+    db.commit()
+    return WorkflowResponse(message="Settlement Submitted", case_id=str(case_id), status="SETTLEMENT_SUBMITTED")
 
 @router.post("/{case_id}/db/issue", response_model=WorkflowResponse)
 async def db_issue_case(
@@ -306,28 +310,30 @@ async def db_issue_case(
     current_user: Annotated[UserInDB, Depends(has_role([Role.ACCOUNTING, Role.ADMIN]))],
     db: Session = Depends(get_db)
 ):
-    with db.begin():
-        db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
-        if not db_case: raise HTTPException(404, "Case not found")
-        if db_case.status != CaseStatus.SETTLEMENT_SUBMITTED: raise HTTPException(409, "Must be SETTLEMENT_SUBMITTED")
-        
-        if db.execute(select(Document).filter_by(case_id=case_id, doc_type=DocumentType.DB)).scalar_one_or_none():
-             raise HTTPException(409, "DB already exists")
+    # REMOVED: with db.begin()
+    db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
+    if not db_case: raise HTTPException(404, "Case not found")
+    if db_case.status != CaseStatus.SETTLEMENT_SUBMITTED: raise HTTPException(409, "Must be SETTLEMENT_SUBMITTED")
+    
+    if db.execute(select(Document).filter_by(case_id=case_id, doc_type=DocumentType.DB)).scalar_one_or_none():
+            raise HTTPException(409, "DB already exists")
 
-        # Get actual amount from audit log (simplified)
-        log = db.execute(select(AuditLog).filter_by(entity_id=case_id, action="settlement_submit").order_by(AuditLog.performed_at.desc())).scalar_one_or_none()
-        actual_amount = decimal.Decimal(log.details_json["actual_amount"]) if log else db_case.requested_amount
+    # Get actual amount from audit log
+    log = db.execute(select(AuditLog).filter_by(entity_id=case_id, action="settlement_submit").order_by(AuditLog.performed_at.desc())).scalar_one_or_none()
+    actual_amount = decimal.Decimal(log.details_json["actual_amount"]) if log else db_case.requested_amount
 
-        db_doc_no = _generate_document_no(db, DocumentType.DB)
-        db_doc = Document(case_id=case_id, doc_type=DocumentType.DB, doc_no=db_doc_no, amount=actual_amount, pdf_uri="generated_by_backend", created_by=current_user.username)
-        db.add(db_doc)
+    db_doc_no = _generate_document_no(db, DocumentType.DB)
+    db_doc = Document(case_id=case_id, doc_type=DocumentType.DB, doc_no=db_doc_no, amount=actual_amount, pdf_uri="generated_by_backend", created_by=current_user.username)
+    db.add(db_doc)
 
-        db_case.status = CaseStatus.CLOSED # Close case after DB
-        db.flush()
-        log_audit_event(db, "case", case_id, "db_issue", current_user.username, {"doc": db_doc_no})
-        return WorkflowResponse(message="DB Issued & Closed", case_id=str(case_id), status="CLOSED", doc_no=db_doc_no)
+    db_case.status = CaseStatus.CLOSED # Close case after DB
+    db.flush()
+    log_audit_event(db, "case", case_id, "db_issue", current_user.username, {"doc": db_doc_no})
+    
+    db.commit()
+    return WorkflowResponse(message="DB Issued & Closed", case_id=str(case_id), status="CLOSED", doc_no=db_doc_no)
 
-# ... (list_cases, list_attachments, etc. ใช้ของเดิมได้)
+# ... (Endpoints ที่เหลือเหมือนเดิม)
 @router.get("/", response_model=List[CaseResponse])
 async def read_cases(
     current_user: Annotated[UserInDB, Depends(get_current_user)],
