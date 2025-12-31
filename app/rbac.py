@@ -27,8 +27,11 @@ def get_current_user(db: Session, request: Request) -> Tuple[User | None, JSONRe
                 details={},
             ),
         )
-
-    user = db.query(User).filter(User.google_sub == identity).first()
+    try:
+        user = db.query(User).filter(User.id == identity).first()
+    except Exception:
+        user = None
+        
     if not user:
         return None, JSONResponse(
             status_code=401,
