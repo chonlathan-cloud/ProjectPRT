@@ -368,3 +368,33 @@ This document breaks down the implementation plan for the PRT Software Accountin
 **Dependencies:** All tasks from Phase 3, Task 4.3, Task 5.4, Task 6.1
 **Test Requirements:**
 *   Integration: The test itself is the primary verification. It must pass without errors.
+
+
+## Phase 3: Voucher System Refactor (Priority High)
+
+### Database & Models
+- [ ] **T3.1** Run Alembic migration `refactor_voucher_system` to update DB schema.
+- [ ] **T3.2** Update SQLAlchemy models in `app/models.py`:
+    - Rename/Update `DocumentType` Enum (PV, RV, JV).
+    - Update `CaseStatus` Enum.
+    - Add `deposit_account_id` and `is_receipt_uploaded` to `Case` model.
+    - Add `JVLineItem` model.
+
+### Logic Refactoring (Backend)
+- [ ] **T3.3** Refactor `POST /api/cases` (Create Case):
+    - Accept `deposit_account_id` in payload.
+    - Add validation: If Category Type is REVENUE/ASSET, `deposit_account_id` is required.
+- [ ] **T3.4** Refactor `POST /api/cases/{id}/approve` (Finance Approval):
+    - Change logic: Generate **PV** Document immediately.
+    - Generate Doc No format `PV-YYMM-XXXX`.
+    - Update status to `APPROVED`.
+- [ ] **T3.5** Implement Receipt Upload Logic:
+    - Update Attachment Upload API to set `cases.is_receipt_uploaded = True` automatically when type='RECEIPT'.
+    - OR create a specific endpoint `POST /cases/{id}/confirm-receipt` if manual confirmation is preferred.
+- [ ] **T3.6** Create JV API (`POST /api/documents/jv`):
+    - Input: List of `case_ids` to be linked.
+    - Logic: Sum amounts, create JV Document, create `jv_line_items`, and close related cases.
+
+### Frontend Alignment (Requirements)
+- [ ] **T3.7** Update `Form.tsx`: Add "Deposit Account" dropdown (Filter categories where type=ASSET) when creating Revenue/Return forms.
+- [ ] **T3.8** Update Dashboard: Display PV Numbers instead of old document types.

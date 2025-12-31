@@ -10,12 +10,13 @@ from sqlalchemy import select, and_
 
 from app.db import get_db
 from app.deps import Role, has_role, get_current_user, UserInDB
-from app.models import Category, Case, CaseStatus, FundingType, Document, DocCounter, Payment, PaymentType, DocumentType, AuditLog, Attachment
+# Import new enums and models
+from app.models import (
+    Category, Case, CaseStatus, FundingType, Document, DocCounter, 
+    Payment, PaymentType, DocumentType, AuditLog, Attachment, CategoryType
+)
 from app.schemas.case import CaseCreate, CaseResponse, CaseSubmit
-from app.schemas.workflow import PaymentCreate, SettlementSubmit, WorkflowResponse
-from app.schemas.adjustment import AdjustmentType, AdjustmentCreate, PaymentOut, VarianceResponse
-from app.schemas.attachment import AttachmentOut
-from app.schemas.files import SignedUrlResponse
+from app.schemas.workflow import WorkflowResponse
 from app.services.audit import log_audit_event
 from app.config import settings
 from app.services import gcs
@@ -26,7 +27,7 @@ router = APIRouter(
     tags=["Cases"]
 )
 
-# ... (Helper functions keep the same) ...
+# ... Helper Functions ...
 def generate_case_no() -> str:
     today_str = datetime.now(timezone.utc).strftime("%y%m%d")
     unique_suffix = uuid.uuid4().hex[:6].upper()
@@ -36,9 +37,8 @@ def _generate_document_no(db: Session, doc_prefix_enum: DocumentType) -> str:
     doc_prefix = doc_prefix_enum.value
     current_ym = datetime.now(timezone.utc).strftime("%y%m")
     
-    # Check current counter
     doc_counter = db.execute(
-        select(DocCounter).filter_by(doc_prefix=doc_prefix, year_month=current_ym).with_for_update()
+        select(DocCounter).filter_by(doc_prefix=doc_prefix_enum, year_month=current_ym).with_for_update()
     ).scalar_one_or_none()
 
     if not doc_counter:
@@ -48,43 +48,7 @@ def _generate_document_no(db: Session, doc_prefix_enum: DocumentType) -> str:
     
     doc_counter.last_number += 1
     new_number = int(doc_counter.last_number)
-    padded_number = f"{new_number:04d}"
-    return f"{doc_prefix}-{current_ym}-{padded_number}"
-
-async def _calculate_variance_info(db: Session, case_id: UUID) -> dict:
-    cr_document = db.execute(select(Document).filter_by(case_id=case_id, doc_type=DocumentType.CR)).scalar_one_or_none()
-    db_document = db.execute(select(Document).filter_by(case_id=case_id, doc_type=DocumentType.DB)).scalar_one_or_none()
-    
-    if not cr_document or not db_document:
-         return {
-            "cr_amount": decimal.Decimal(0),
-            "db_amount": decimal.Decimal(0),
-            "variance": decimal.Decimal(0),
-            "expected_adjustment_type": None,
-            "expected_adjustment_amount": decimal.Decimal(0),
-        }
-
-    cr_amount = decimal.Decimal(cr_document.amount)
-    db_amount = decimal.Decimal(db_document.amount)
-    variance = db_amount - cr_amount
-
-    expected_adjustment_type = None
-    expected_adjustment_amount = decimal.Decimal("0.00")
-
-    if variance < 0:
-        expected_adjustment_type = AdjustmentType.REFUND
-        expected_adjustment_amount = abs(variance)
-    elif variance > 0:
-        expected_adjustment_type = AdjustmentType.ADDITIONAL
-        expected_adjustment_amount = variance
-
-    return {
-        "cr_amount": cr_amount,
-        "db_amount": db_amount,
-        "variance": variance,
-        "expected_adjustment_type": expected_adjustment_type,
-        "expected_adjustment_amount": expected_adjustment_amount,
-    }
+    return f"{doc_prefix}-{current_ym}-{new_number:04d}"
 
 def _ensure_case_visibility(db_case: Case, current_user: UserInDB) -> None:
     can_see_all = any(role in current_user.roles for role in [
@@ -101,16 +65,32 @@ async def create_case(
     current_user: Annotated[UserInDB, Depends(has_role([Role.REQUESTER]))],
     db: Session = Depends(get_db)
 ):
+    # 1. Validate Category
     category = db.execute(select(Category).filter_by(id=payload.category_id)).scalar_one_or_none()
     if not category:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Category not found.")
     if not category.is_active:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Category is inactive.")
 
+    # 2. [Refactor] Validate Deposit Account for Revenue/Asset
+    if category.type in [CategoryType.REVENUE, CategoryType.ASSET]:
+        if not payload.deposit_account_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, 
+                detail="Deposit account (deposit_account_id) is required for Revenue or Asset cases."
+            )
+        
+        # Verify deposit account exists
+        deposit_acc = db.execute(select(Category).filter_by(id=payload.deposit_account_id)).scalar_one_or_none()
+        if not deposit_acc:
+             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deposit account not found.")
+        
+        # Optional: Check if deposit account is actually an ASSET type? (Rules might vary, keeping flexible for now)
+
     account_code = category.account_code
     case_no = generate_case_no()
     
-    # Ensure uniqueness (simple check)
+    # Ensure uniqueness
     while db.execute(select(Case).filter_by(case_no=case_no)).scalar_one_or_none():
         case_no = generate_case_no()
 
@@ -125,6 +105,11 @@ async def create_case(
         requested_amount=payload.requested_amount,
         purpose=payload.purpose,
         status=CaseStatus.DRAFT,
+        
+        # New Fields
+        deposit_account_id=payload.deposit_account_id,
+        is_receipt_uploaded=False, # Default
+
         created_by=current_user.username
     )
 
@@ -143,32 +128,19 @@ async def submit_case(
     current_user: Annotated[UserInDB, Depends(has_role([Role.REQUESTER]))],
     db: Session = Depends(get_db)
 ):
-    # REMOVED: with db.begin() -> causing double transaction error
     db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
     if not db_case:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found.")
+        raise HTTPException(status_code=404, detail="Case not found.")
 
     if db_case.requester_id != current_user.username:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to submit this case.")
+        raise HTTPException(status_code=403, detail="Not authorized to submit this case.")
 
     if db_case.status != CaseStatus.DRAFT:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Only DRAFT cases can be submitted.")
+        raise HTTPException(status_code=409, detail=f"Only DRAFT cases can be submitted.")
 
-    # --- A. สร้างเลข PS ทันที ---
-    ps_doc_no = _generate_document_no(db, DocumentType.PS)
+    # Note: For Voucher System, we DO NOT generate PV here. PV is generated at Approval.
+    # Just update status.
     
-    # --- B. สร้าง Document Record ---
-    db_document = Document(
-        case_id=case_id,
-        doc_type=DocumentType.PS,
-        doc_no=ps_doc_no,
-        amount=db_case.requested_amount,
-        pdf_uri="generated_by_frontend", 
-        created_by=current_user.username
-    )
-    db.add(db_document)
-
-    # --- C. อัปเดตสถานะ ---
     old_status = db_case.status
     db_case.status = CaseStatus.SUBMITTED
     db_case.updated_by = current_user.username
@@ -178,162 +150,50 @@ async def submit_case(
 
     log_audit_event(
         db, "case", db_case.id, "submit", current_user.username,
-        {"old_status": old_status.value, "new_status": db_case.status.value, "ps_doc_no": ps_doc_no}
+        {"old_status": old_status.value, "new_status": db_case.status.value}
     )
 
-    db.commit() # Explicit commit
+    db.commit()
 
     return WorkflowResponse(
-        message=f"Case {db_case.case_no} submitted. PS Document {ps_doc_no} generated.",
+        message=f"Case {db_case.case_no} submitted for approval.",
         case_id=str(db_case.id),
-        status=db_case.status.value,
-        doc_no=ps_doc_no, 
-        audit_details={"ps_doc_no": ps_doc_no}
+        status=db_case.status.value
     )
 
-@router.post("/{case_id}/ps/approve", response_model=WorkflowResponse)
-async def ps_approve_case(
+# --- Deprecated / Needs Update Endpoints ---
+# IMPORTANT: The following endpoints need to be updated for PV/RV/JV flow later (Task 3.4, 3.6).
+# For now, I've updated Enum references to avoid crashes, but logic needs full refactor.
+
+@router.post("/{case_id}/approve", response_model=WorkflowResponse) # Renamed from ps/approve for generic use
+async def approve_case(
     case_id: UUID,
     current_user: Annotated[UserInDB, Depends(has_role([Role.FINANCE, Role.ADMIN]))],
     db: Session = Depends(get_db)
 ):
-    # REMOVED: with db.begin()
-    db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
-    if not db_case:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found.")
-
-    if db_case.status != CaseStatus.SUBMITTED:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Case status must be SUBMITTED.")
-
-    # Find existing PS doc
-    existing_ps_doc = db.execute(
-        select(Document).filter_by(case_id=case_id, doc_type=DocumentType.PS)
-    ).scalar_one_or_none()
-    
-    ps_doc_no = existing_ps_doc.doc_no if existing_ps_doc else _generate_document_no(db, DocumentType.PS)
-    
-    old_status = db_case.status
-    db_case.status = CaseStatus.PS_APPROVED
-    db_case.updated_by = current_user.username
-    db_case.updated_at = datetime.now(timezone.utc)
-
-    db.flush()
-
-    log_audit_event(
-        db, "case", db_case.id, "ps_approve", current_user.username,
-        {"old_status": old_status.value, "new_status": db_case.status.value}
-    )
-    
-    db.commit()
-
-    return WorkflowResponse(
-        message=f"Case {db_case.case_no} PS approved.",
-        case_id=str(db_case.id),
-        status=db_case.status.value,
-        doc_no=ps_doc_no,
-        audit_details={}
-    )
-
-@router.post("/{case_id}/cr/issue", response_model=WorkflowResponse)
-async def cr_issue_case(
-    case_id: UUID,
-    current_user: Annotated[UserInDB, Depends(has_role([Role.ACCOUNTING, Role.ADMIN]))],
-    db: Session = Depends(get_db)
-):
-    # REMOVED: with db.begin()
-    db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
-    if not db_case: raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found.")
-    if db_case.status != CaseStatus.PS_APPROVED:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Status must be PS_APPROVED.")
-    
-    if db.execute(select(Document).filter_by(case_id=case_id, doc_type=DocumentType.CR)).scalar_one_or_none():
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"CR already exists.")
-
-    cr_doc_no = _generate_document_no(db, DocumentType.CR)
-    db_cr = Document(case_id=case_id, doc_type=DocumentType.CR, doc_no=cr_doc_no, amount=db_case.requested_amount, pdf_uri="generated_by_backend", created_by=current_user.username)
-    db.add(db_cr)
-    
-    old_s = db_case.status
-    db_case.status = CaseStatus.CR_ISSUED
-    db.flush()
-    log_audit_event(db, "case", case_id, "cr_issue", current_user.username, {"old": old_s.value, "new": db_case.status.value, "doc": cr_doc_no})
-    
-    db.commit()
-    return WorkflowResponse(message="CR Issued", case_id=str(case_id), status=db_case.status.value, doc_no=cr_doc_no)
-
-@router.post("/{case_id}/payment", response_model=WorkflowResponse)
-async def record_payment_for_case(
-    case_id: UUID, payment_in: PaymentCreate,
-    current_user: Annotated[UserInDB, Depends(has_role([Role.TREASURY, Role.ADMIN]))],
-    db: Session = Depends(get_db)
-):
-    # REMOVED: with db.begin()
-    db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
-    if not db_case: raise HTTPException(status_code=404, detail="Case not found")
-    if db_case.status != CaseStatus.CR_ISSUED: raise HTTPException(status_code=409, detail="Must be CR_ISSUED")
-    
-    cr_doc = db.execute(select(Document).filter_by(case_id=case_id, doc_type=DocumentType.CR)).scalar_one_or_none()
-    if not cr_doc: raise HTTPException(status_code=404, detail="CR doc missing")
-
-    db_pay = Payment(case_id=case_id, type=PaymentType.DISBURSE, amount=cr_doc.amount, paid_by=current_user.username, paid_at=datetime.now(timezone.utc), reference_no=payment_in.reference_no)
-    db.add(db_pay)
-    
-    db_case.status = CaseStatus.PAID
-    db.flush()
-    log_audit_event(db, "case", case_id, "payment", current_user.username, {"amount": float(cr_doc.amount)})
-    
-    db.commit()
-    return WorkflowResponse(message="Payment Recorded", case_id=str(case_id), status="PAID")
-
-@router.post("/{case_id}/settlement/submit", response_model=WorkflowResponse)
-async def submit_settlement_for_case(
-    case_id: UUID, settlement_in: SettlementSubmit,
-    current_user: Annotated[UserInDB, Depends(has_role([Role.REQUESTER]))],
-    db: Session = Depends(get_db)
-):
-    # REMOVED: with db.begin()
     db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
     if not db_case: raise HTTPException(404, "Case not found")
-    if db_case.status != CaseStatus.PAID: raise HTTPException(409, "Must be PAID")
-    if db_case.requester_id != current_user.username: raise HTTPException(403, "Not owner")
+    if db_case.status != CaseStatus.SUBMITTED: raise HTTPException(409, "Must be SUBMITTED")
 
-    db_case.status = CaseStatus.SETTLEMENT_SUBMITTED
-    db.flush()
-    log_audit_event(db, "case", case_id, "settlement_submit", current_user.username, {"actual_amount": float(settlement_in.actual_amount)})
+    # [TODO Task 3.4] Logic to generate PV here
+    pv_doc_no = _generate_document_no(db, DocumentType.PV)
     
-    db.commit()
-    return WorkflowResponse(message="Settlement Submitted", case_id=str(case_id), status="SETTLEMENT_SUBMITTED")
-
-@router.post("/{case_id}/db/issue", response_model=WorkflowResponse)
-async def db_issue_case(
-    case_id: UUID,
-    current_user: Annotated[UserInDB, Depends(has_role([Role.ACCOUNTING, Role.ADMIN]))],
-    db: Session = Depends(get_db)
-):
-    # REMOVED: with db.begin()
-    db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
-    if not db_case: raise HTTPException(404, "Case not found")
-    if db_case.status != CaseStatus.SETTLEMENT_SUBMITTED: raise HTTPException(409, "Must be SETTLEMENT_SUBMITTED")
-    
-    if db.execute(select(Document).filter_by(case_id=case_id, doc_type=DocumentType.DB)).scalar_one_or_none():
-            raise HTTPException(409, "DB already exists")
-
-    # Get actual amount from audit log
-    log = db.execute(select(AuditLog).filter_by(entity_id=case_id, action="settlement_submit").order_by(AuditLog.performed_at.desc())).scalar_one_or_none()
-    actual_amount = decimal.Decimal(log.details_json["actual_amount"]) if log else db_case.requested_amount
-
-    db_doc_no = _generate_document_no(db, DocumentType.DB)
-    db_doc = Document(case_id=case_id, doc_type=DocumentType.DB, doc_no=db_doc_no, amount=actual_amount, pdf_uri="generated_by_backend", created_by=current_user.username)
+    # Mocking PV creation for now to prevent crash
+    # Real implementation needs PDF generation logic
+    db_doc = Document(
+        case_id=case_id, doc_type=DocumentType.PV, doc_no=pv_doc_no, 
+        amount=db_case.requested_amount, pdf_uri="pending_gen", created_by=current_user.username
+    )
     db.add(db_doc)
 
-    db_case.status = CaseStatus.CLOSED # Close case after DB
+    old_s = db_case.status
+    db_case.status = CaseStatus.APPROVED # New Status
     db.flush()
-    log_audit_event(db, "case", case_id, "db_issue", current_user.username, {"doc": db_doc_no})
+    log_audit_event(db, "case", case_id, "approve", current_user.username, {"old": old_s.value, "new": db_case.status.value})
     
     db.commit()
-    return WorkflowResponse(message="DB Issued & Closed", case_id=str(case_id), status="CLOSED", doc_no=db_doc_no)
+    return WorkflowResponse(message="Case Approved (PV Generated)", case_id=str(case_id), status="APPROVED", doc_no=pv_doc_no)
 
-# ... (Endpoints ที่เหลือเหมือนเดิม)
 @router.get("/", response_model=List[CaseResponse])
 async def read_cases(
     current_user: Annotated[UserInDB, Depends(get_current_user)],
