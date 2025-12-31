@@ -1,101 +1,111 @@
-from datetime import datetime, timezone
-from typing import List, Annotated
+from typing import Annotated, List
 from uuid import UUID
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 
 from app.db import get_db
-from app.deps import get_current_user, UserInDB
-from app.models import Document, Case, DocumentType # Import DocumentType
-from app.schemas.document import DocumentOut
-from app.schemas.files import SignedUrlResponse
-from app.services.audit import log_audit_event
-from app.config import settings
-from app.services import gcs
-from app.routers.cases import _ensure_case_visibility # Reusing the helper from cases router
-
+from app.deps import Role, has_role, UserInDB
+from app.models import (
+    Document, DocumentType, Case, CaseStatus, 
+    JVLineItem, DocCounter
+)
+from app.schemas.document import JVCreate, DocumentResponse
 
 router = APIRouter(
-    prefix="/api/v1/cases/{case_id}/documents",
+    prefix="/api/v1/documents",
     tags=["Documents"]
 )
 
-@router.get("", response_model=List[DocumentOut])
-async def list_documents_for_case(
-    case_id: UUID,
-    current_user: Annotated[UserInDB, Depends(get_current_user)],
-    db: Session = Depends(get_db)
-):
-    db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
-    if not db_case:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found.")
-
-    _ensure_case_visibility(db_case, current_user)
-
-    # Order by doc_type (PS, CR, DB) and then created_at
-    documents = db.execute(
-        select(Document)
-        .filter_by(case_id=case_id)
-        .order_by(Document.created_at.asc())
-    ).scalars().all()
-
-    return [DocumentOut.model_validate(doc) for doc in documents]
-
-
-@router.get("/{doc_type}/download-url", response_model=SignedUrlResponse)
-async def get_document_download_url(
-    case_id: UUID,
-    doc_type: DocumentType, # Use DocumentType enum for validation
-    current_user: Annotated[UserInDB, Depends(get_current_user)],
-    db: Session = Depends(get_db)
-):
-    db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
-    if not db_case:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found.")
-
-    _ensure_case_visibility(db_case, current_user)
-
-    db_document = db.execute(
-        select(Document)
-        .filter_by(case_id=case_id, doc_type=doc_type)
+def _generate_document_no(db: Session, doc_prefix_enum: DocumentType) -> str:
+    # Reuse Logic เดิม (ควร Refactor ไปไว้ใน service หรือ utils กลางในอนาคต)
+    doc_prefix = doc_prefix_enum.value
+    current_ym = datetime.now(timezone.utc).strftime("%y%m")
+    
+    doc_counter = db.execute(
+        select(DocCounter).filter_by(doc_prefix=doc_prefix_enum, year_month=current_ym).with_for_update()
     ).scalar_one_or_none()
 
-    if not db_document:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"{doc_type.value} document not found for case {case_id}.")
+    if not doc_counter:
+        doc_counter = DocCounter(doc_prefix=doc_prefix_enum, year_month=current_ym, last_number=0)
+        db.add(doc_counter)
+        db.flush()
+    
+    doc_counter.last_number += 1
+    new_number = int(doc_counter.last_number)
+    return f"{doc_prefix}-{current_ym}-{new_number:04d}"
 
-    if not db_document.pdf_uri or db_document.pdf_uri.startswith("placeholder_"):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"PDF URI for {doc_type.value} document not found or is a placeholder.")
+@router.post("/jv", response_model=DocumentResponse, status_code=status.HTTP_201_CREATED)
+async def create_jv(
+    payload: JVCreate,
+    current_user: Annotated[UserInDB, Depends(has_role([Role.ACCOUNTING, Role.ADMIN, Role.FINANCE]))],
+    db: Session = Depends(get_db)
+):
+    """
+    Create a Journal Voucher (JV) to aggregate multiple cases (PVs).
+    Logic:
+    1. Validate all cases exist and are PAID (or APPROVED).
+    2. Sum amounts.
+    3. Create JV Document linked to Main Case.
+    4. Create JV Line Items.
+    5. Auto-Close all involved cases.
+    """
+    
+    # 1. Combine IDs (Ensure Main Case is in the list)
+    all_case_ids = set(payload.linked_case_ids)
+    all_case_ids.add(payload.main_case_id)
+    
+    # 2. Fetch Cases
+    cases = db.execute(select(Case).filter(Case.id.in_(all_case_ids))).scalars().all()
+    
+    if len(cases) != len(all_case_ids):
+        raise HTTPException(404, "Some cases not found.")
+    
+    total_amount = 0
+    
+    for c in cases:
+        # Validate Status: Should be PAID or APPROVED?
+        # Usually we do JV after Payment to clear/close.
+        if c.status not in [CaseStatus.PAID, CaseStatus.APPROVED]:
+             raise HTTPException(400, f"Case {c.case_no} is in {c.status.value} status. Must be PAID or APPROVED to include in JV.")
+        
+        total_amount += c.requested_amount # Or actual paid amount? Using requested for now as per schema.
 
-    # Extract object_name from pdf_uri
-    # Assuming pdf_uri format is gs://<bucket_name>/<object_name>
-    uri_prefix = f"gs://{settings.GCS_BUCKET_NAME}/"
-    if not db_document.pdf_uri.startswith(uri_prefix):
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Invalid PDF URI format.")
-
-    object_name = db_document.pdf_uri[len(uri_prefix):]
-
-    signed_url = gcs.generate_signed_download_url(object_name=object_name)
-
-    log_audit_event(
-        db,
-        entity_type="document",
-        entity_id=db_document.id,
-        action="download_url_generated",
-        performed_by=current_user.username,
-        details_json={
-            "case_id": str(db_case.id),
-            "doc_type": doc_type.value,
-            "doc_no": db_document.doc_no,
-            "pdf_uri": db_document.pdf_uri,
-            "expires_in_seconds": settings.SIGNED_URL_EXPIRATION_SECONDS
-        }
+    # 3. Generate JV Doc No
+    jv_no = _generate_document_no(db, DocumentType.JV)
+    
+    # 4. Create Document Header
+    jv_doc = Document(
+        case_id=payload.main_case_id, # Link to Main Case
+        doc_type=DocumentType.JV,
+        doc_no=jv_no,
+        amount=total_amount,
+        pdf_uri="pending_jv_gen",
+        created_by=current_user.username
     )
+    db.add(jv_doc)
+    db.flush() # Get ID
+    
+    # 5. Create Line Items & Close Cases
+    for c in cases:
+        # Line Item
+        line = JVLineItem(
+            jv_document_id=jv_doc.id,
+            ref_case_id=c.id,
+            amount=c.requested_amount
+        )
+        db.add(line)
+        
+        # Close Case (Auto-close via JV)
+        # Note: We bypass 'is_receipt_uploaded' check here because JV itself implies settlement evidence is being handled.
+        # Or we can require upload on the Main Case. Let's Auto-Close for convenience.
+        c.status = CaseStatus.CLOSED
+        c.updated_by = current_user.username
+        c.updated_at = datetime.now(timezone.utc)
+
     db.commit()
-
-    return SignedUrlResponse(
-        signed_url=signed_url,
-        method="GET",
-        expires_in=settings.SIGNED_URL_EXPIRATION_SECONDS
-    )
+    db.refresh(jv_doc)
+    
+    return DocumentResponse.model_validate(jv_doc)
