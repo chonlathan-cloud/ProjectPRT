@@ -16,7 +16,7 @@ from app.services import gcs
 from app.services.audit import log_audit_event
 
 router = APIRouter(
-    prefix="/api/files",
+    prefix="/api/v1/files",
     tags=["Files"]
 )
 

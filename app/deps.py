@@ -8,7 +8,7 @@ from sqlalchemy import select
 
 from app.db import get_db
 from app.core.security import decode_access_token
-from app.models import User, UserRole  # ต้องมี Models นี้ใน app/models.py
+from app.models import User, UserRole 
 
 # Role Enum
 class Role(str, enum.Enum):
@@ -65,7 +65,9 @@ async def get_current_user(
         except ValueError:
             pass # Ignore invalid roles in DB
 
-    return UserInDB(username=user.google_sub, roles=roles_enum, id=str(user.id))
+    # --- แก้ไขตรงนี้: ถ้า google_sub เป็น None ให้ใช้ email แทน ---
+    username_val = user.google_sub if user.google_sub else user.email
+    return UserInDB(username=username_val, roles=roles_enum, id=str(user.id))
 
 
 def has_role(required_roles: List[Role]):

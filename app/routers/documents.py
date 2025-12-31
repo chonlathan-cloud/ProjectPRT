@@ -18,7 +18,7 @@ from app.routers.cases import _ensure_case_visibility # Reusing the helper from 
 
 
 router = APIRouter(
-    prefix="/api/cases/{case_id}/documents",
+    prefix="/api/v1/cases/{case_id}/documents",
     tags=["Documents"]
 )
 
