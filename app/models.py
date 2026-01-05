@@ -9,16 +9,16 @@ from sqlalchemy.sql import func
 Base = declarative_base()
 
 # --- Enums (Refactored) ---
-class CategoryType(enum.Enum):
+class CategoryType(str, enum.Enum):
     EXPENSE = "EXPENSE"
     REVENUE = "REVENUE"
     ASSET = "ASSET"
 
-class FundingType(enum.Enum):
+class FundingType(str, enum.Enum):
     OPERATING = "OPERATING"
     GOV_BUDGET = "GOV_BUDGET"
 
-class CaseStatus(enum.Enum):
+class CaseStatus(str, enum.Enum):
     # Flow ใหม่สำหรับ Voucher System
     DRAFT = "DRAFT"
     SUBMITTED = "SUBMITTED"
