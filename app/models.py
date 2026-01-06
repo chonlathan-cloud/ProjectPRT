@@ -204,6 +204,7 @@ class User(Base):
     google_sub = Column(String, nullable=True, unique=True)
     email = Column(String, nullable=True, unique=True)
     name = Column(String, nullable=True)
+    position = Column(String, nullable=True)
     hashed_password = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     roles = relationship("UserRole", back_populates="user", cascade="all, delete-orphan")

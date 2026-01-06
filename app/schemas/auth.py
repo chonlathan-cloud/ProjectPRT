@@ -24,6 +24,7 @@ class UserSignupRequest(BaseModel):
     email: EmailStr
     password: str = Field(..., min_length=6)
     name: str
+    position: str | None = None
 
 class UserLoginRequest(BaseModel):
     email: EmailStr

@@ -49,6 +49,7 @@ async def signup(payload: UserSignupRequest, db: Session = Depends(get_db)):
         id=uuid.uuid4(),
         email=payload.email,
         name=payload.name,
+        position=payload.position,
         hashed_password=Hasher.get_password_hash(payload.password),
         # google_sub เป็น None
     )
