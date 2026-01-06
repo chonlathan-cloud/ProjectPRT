@@ -10,7 +10,7 @@ class GoogleUser(BaseModel):
     user_id: str
     email: EmailStr
     name: str
-
+    position: str | None = None
 
 class GoogleAuthData(BaseModel):
     access_token: str

@@ -67,7 +67,7 @@ async def signup(payload: UserSignupRequest, db: Session = Depends(get_db)):
     
     data = GoogleAuthData(
         access_token=access_token,
-        user=GoogleUser(user_id=str(new_user.id), email=new_user.email, name=new_user.name)
+        user=GoogleUser(user_id=str(new_user.id), email=new_user.email, name=new_user.name, position=new_user.position)
     )
     return make_success_response(data.model_dump())
 
@@ -92,7 +92,7 @@ async def login(payload: UserLoginRequest, db: Session = Depends(get_db)):
 
     data = GoogleAuthData(
         access_token=access_token,
-        user=GoogleUser(user_id=str(user.id), email=user.email, name=user.name)
+        user=GoogleUser(user_id=str(user.id), email=user.email, name=user.name, position=user.position)
     )
     return make_success_response(data.model_dump())
 

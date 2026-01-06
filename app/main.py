@@ -17,7 +17,10 @@ app = FastAPI(
     description="Backend for PRT Software Accounting System, Phase 2: Backend Skeleton + RBAC Foundation",
     version="0.1.0",
 )
-
+origins = [
+    "http://localhost:3000",
+    "https://frontend-app-ciqznkq5ea-as.a.run.app",
+]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ALLOW_ORIGINS,
