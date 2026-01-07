@@ -46,6 +46,7 @@ fi
 echo "🏗️  Building Container Image..."
 gcloud builds submit --tag $IMAGE_URL . --project $PROJECT_ID
 
+
 # 4. Deploy ไปยัง Cloud Run
 echo "🚀 Deploying to Cloud Run..."
 gcloud run deploy $SERVICE_NAME \
