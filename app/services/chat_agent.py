@@ -3,7 +3,7 @@ from vertexai.generative_models import GenerativeModel, Tool, FunctionDeclaratio
 from sqlalchemy.orm import Session
 from datetime import datetime
 import logging
-from app.services.chat_tools import search_documents_tool, get_financial_analytics_tool
+from app.services.chat_tools import search_documents_tool, get_financial_analytics_tool, list_case_details_tool
 from app.core.settings import settings
 # ตั้งค่า Logger
 logger = logging.getLogger(__name__)

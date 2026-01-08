@@ -1,7 +1,8 @@
 from datetime import datetime
 from sqlalchemy.orm import Session
-from sqlalchemy import select, func, and_, or_
+from sqlalchemy import select, func, and_, or_, text
 from app.models import Document, DocumentType, Case, Category, Attachment, CaseStatus
+import json
 
 def search_documents_tool(db: Session, keyword: str):
     """
@@ -98,3 +99,50 @@ def get_financial_analytics_tool(
         "breakdown": doc_list,
         "note": f"ยอดรวม{type_label} (สถานะ Approved เท่านั้น)"
     }
+
+def search_cases_with_details_tool(db: Session, category_keyword: str = None, requester_name: str = None, status: str = None):
+    """
+    ค้นหาข้อมูล Case แบบละเอียด (รองรับการถามว่า 'ค่าอาหารมีอะไรบ้าง')
+    """
+    sql = """
+        SELECT 
+            d.doc_no,
+            c.created_at,
+            c.requested_amount,
+            c.purpose,
+            u.name as requester_name,
+            cat.name_th as category_name
+        FROM cases c
+        JOIN categories cat ON c.category_id = cat.id
+        LEFT JOIN documents d ON c.id = d.case_id
+        LEFT JOIN users u ON c.requester_id = u.email -- หรือ u.google_sub ตามโครงสร้าง
+        WHERE 1=1
+    """
+    params = {}
+    
+    if category_keyword:
+        sql += " AND cat.name_th ILIKE :cat_kw"
+        params["cat_kw"] = f"%{category_keyword}%"
+        
+    if requester_name:
+        sql += " AND u.name ILIKE :req_name"
+        params["req_name"] = f"%{requester_name}%"
+
+    if status == 'APPROVED':
+        sql += " AND c.status IN ('APPROVED', 'PAID', 'CLOSED')" # รวมสถานะที่ผ่านแล้ว
+        
+    sql += " ORDER BY c.created_at DESC LIMIT 10"
+    
+    results = db.execute(text(sql), params).fetchall()
+    
+    if not results:
+        return "ไม่พบข้อมูลรายการครับ"
+        
+    # Format ข้อมูลกลับไปให้ AI อ่านง่ายๆ
+    output_list = []
+    for r in results:
+        doc_str = r.doc_no if r.doc_no else "รอออกเลข"
+        date_str = r.created_at.strftime("%d/%m/%Y")
+        output_list.append(f"- {doc_str} | {date_str} | {r.requested_amount:,.2f} บาท | โดย: {r.requester_name} | รายการ: {r.purpose}")
+        
+    return "\n".join(output_list)

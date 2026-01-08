@@ -2,38 +2,50 @@ from datetime import datetime, timezone
 from typing import Optional, List, Annotated
 from uuid import UUID
 import uuid
-import decimal
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import select, and_
 
 from app.db import get_db
 from app.deps import Role, has_role, get_current_user, UserInDB
 from app.models import (
-    Category, Case, CaseStatus, FundingType, Document, DocCounter, 
-    Payment, PaymentType, DocumentType, AuditLog, Attachment, CategoryType
+    Category, Case, CaseStatus, Document, DocCounter, 
+    DocumentType, CategoryType, User, WorkflowResponse
 )
-from app.schemas.case import CaseCreate, CaseResponse, CaseSubmit
-from app.schemas.workflow import WorkflowResponse
+from app.schemas.case import CaseCreate, CaseResponse
 from app.services.audit import log_audit_event
-# [REMOVED] from app.services import pdf  <-- ไม่ต้องใช้แล้ว
+from pydantic import BaseModel
 
 router = APIRouter(
     prefix="/api/v1/cases",
     tags=["Cases"]
 )
 
-# ... (Helper Functions คงเดิม) ...
+# ✅ Model พิเศษสำหรับหน้า Admin/Dashboard ที่ต้องการข้อมูลเยอะๆ
+class CaseAdminView(BaseModel):
+    id: UUID
+    case_no: str
+    doc_no: Optional[str] = None  # เลขที่เอกสาร (PV/RV)
+    requester_name: str           # ชื่อจริงผู้ขอเบิก
+    description: str              # รายละเอียด (purpose)
+    requested_amount: float
+    created_at: datetime
+    status: str
+    department: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+# --- Helper Functions ---
 def generate_case_no() -> str:
     today_str = datetime.now(timezone.utc).strftime("%y%m%d")
     unique_suffix = uuid.uuid4().hex[:6].upper()
     return f"CAS-{today_str}-{unique_suffix}"
 
 def _generate_document_no(db: Session, doc_prefix_enum: DocumentType) -> str:
-    doc_prefix = doc_prefix_enum.value
+    # ล็อคแถวเพื่อป้องกันเลขซ้ำ (Concurrency Control)
     current_ym = datetime.now(timezone.utc).strftime("%y%m")
-    
     doc_counter = db.execute(
         select(DocCounter).filter_by(doc_prefix=doc_prefix_enum, year_month=current_ym).with_for_update()
     ).scalar_one_or_none()
@@ -45,7 +57,7 @@ def _generate_document_no(db: Session, doc_prefix_enum: DocumentType) -> str:
     
     doc_counter.last_number += 1
     new_number = int(doc_counter.last_number)
-    return f"{doc_prefix}-{current_ym}-{new_number:04d}"
+    return f"{doc_prefix_enum.value}-{current_ym}-{new_number:04d}"
 
 def _ensure_case_visibility(db_case: Case, current_user: UserInDB) -> None:
     can_see_all = any(role in current_user.roles for role in [
@@ -54,14 +66,14 @@ def _ensure_case_visibility(db_case: Case, current_user: UserInDB) -> None:
     if not can_see_all and db_case.requester_id != current_user.username:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to view this case.")
 
-# ... (Create, Submit Endpoints คงเดิม ไม่ต้องแก้) ...
+# --- Endpoints ---
+
 @router.post("/", response_model=CaseResponse, status_code=status.HTTP_201_CREATED)
 async def create_case(
     payload: CaseCreate,
     current_user: Annotated[UserInDB, Depends(has_role([Role.REQUESTER]))],
     db: Session = Depends(get_db)
 ):
-    # Logic เดิม...
     category = db.execute(select(Category).filter_by(id=payload.category_id)).scalar_one_or_none()
     if not category: raise HTTPException(404, "Category not found.")
     if not category.is_active: raise HTTPException(400, "Category is inactive.")
@@ -69,18 +81,12 @@ async def create_case(
     if category.type in [CategoryType.REVENUE, CategoryType.ASSET]:
         if not payload.deposit_account_id:
             raise HTTPException(400, "Deposit account is required for Revenue/Asset cases.")
-        if not db.execute(select(Category).filter_by(id=payload.deposit_account_id)).scalar_one_or_none():
-             raise HTTPException(404, "Deposit account not found.")
 
-    account_code = category.account_code
     case_no = generate_case_no()
-    while db.execute(select(Case).filter_by(case_no=case_no)).scalar_one_or_none():
-        case_no = generate_case_no()
-
     db_case = Case(
         case_no=case_no,
         category_id=payload.category_id,
-        account_code=account_code,
+        account_code=category.account_code,
         requester_id=current_user.username,
         department_id=payload.department_id,
         cost_center_id=payload.cost_center_id,
@@ -104,24 +110,53 @@ async def submit_case(
     current_user: Annotated[UserInDB, Depends(has_role([Role.REQUESTER]))],
     db: Session = Depends(get_db)
 ):
-    # Logic เดิม...
-    db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
-    if not db_case: raise HTTPException(404, "Case not found.")
-    if db_case.requester_id != current_user.username: raise HTTPException(403, "Not authorized.")
-    if db_case.status != CaseStatus.DRAFT: raise HTTPException(409, "Only DRAFT cases can be submitted.")
+    with db.begin(): # Transaction Start
+        db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
+        if not db_case: raise HTTPException(404, "Case not found.")
+        
+        if db_case.requester_id != current_user.username: raise HTTPException(403, "Not authorized.")
+        if db_case.status != CaseStatus.DRAFT: raise HTTPException(409, "Only DRAFT cases can be submitted.")
 
-    old_status = db_case.status
-    db_case.status = CaseStatus.SUBMITTED
-    db_case.updated_by = current_user.username
-    db_case.updated_at = datetime.now(timezone.utc)
-    
-    db.commit()
-    log_audit_event(db, "case", db_case.id, "submit", current_user.username, {"old": old_status.value, "new": db_case.status.value})
-    return WorkflowResponse(message=f"Case {db_case.case_no} submitted.", case_id=str(db_case.id), status=db_case.status.value)
+        # --- ✅ GEN DOCUMENT NO (ย้ายมาตรงนี้ถูกต้องแล้ว) ---
+        category = db.execute(select(Category).filter_by(id=db_case.category_id)).scalar_one()
+        
+        doc_type = DocumentType.PV if category.type == CategoryType.EXPENSE else DocumentType.RV
+        doc_no = _generate_document_no(db, doc_type)
+        
+        # Check existing to be safe
+        existing_doc = db.execute(select(Document).filter_by(case_id=case_id)).scalar_one_or_none()
+        if not existing_doc:
+            new_doc = Document(
+                case_id=case_id,
+                doc_type=doc_type,
+                doc_no=doc_no,
+                amount=db_case.requested_amount,
+                pdf_uri="pending-approval", 
+                created_by=current_user.username
+            )
+            db.add(new_doc)
+        else:
+            doc_no = existing_doc.doc_no # กรณีมีอยู่แล้ว (อาจจะ re-submit) ให้ใช้เลขเดิม
 
-# --------------------------------------------------------------------------------
-# [UPDATE] Approve Endpoint: ตัด Logic PDF ทิ้ง
-# --------------------------------------------------------------------------------
+        old_status = db_case.status
+        db_case.status = CaseStatus.SUBMITTED
+        db_case.updated_by = current_user.username
+        db_case.updated_at = datetime.now(timezone.utc)
+        
+        db.flush()
+        
+        log_audit_event(
+            db, "case", db_case.id, "submit_and_gen_no", current_user.username, 
+            {"old": old_status.value, "new": db_case.status.value, "doc_no": doc_no}
+        )
+
+        return WorkflowResponse(
+            message=f"Submitted. Generated {doc_no}", 
+            case_id=str(db_case.id), 
+            status=db_case.status.value,
+            doc_no=doc_no
+        )
+
 @router.post("/{case_id}/approve", response_model=WorkflowResponse)
 async def approve_case(
     case_id: UUID,
@@ -134,37 +169,13 @@ async def approve_case(
     if db_case.status != CaseStatus.SUBMITTED:
         raise HTTPException(409, f"Case must be SUBMITTED to approve.")
 
+    # --- ✅ แก้ไข: ไม่ต้อง Gen เลขใหม่แล้ว แค่เปลี่ยน Status ---
     category = db.execute(select(Category).filter_by(id=db_case.category_id)).scalar_one()
-    
-    doc_type = None
-    new_status = None
+    new_status = CaseStatus.APPROVED if category.type == CategoryType.EXPENSE else CaseStatus.CLOSED
 
-    if category.type == CategoryType.EXPENSE:
-        doc_type = DocumentType.PV
-        new_status = CaseStatus.APPROVED
-    elif category.type in [CategoryType.REVENUE, CategoryType.ASSET]:
-        doc_type = DocumentType.RV
-        new_status = CaseStatus.CLOSED
-    else:
-        raise HTTPException(400, f"Unknown category type")
-
-    # Gen เลขเอกสาร
-    doc_no = _generate_document_no(db, doc_type)
-    
-    existing_doc = db.execute(select(Document).filter_by(case_id=case_id, doc_type=doc_type)).scalar_one_or_none()
-    if existing_doc:
-        raise HTTPException(409, f"{doc_type.value} Document already exists.")
-
-    # [CHANGE] ไม่ต้องสร้าง PDF จริง, ใช้ Placeholder "client-render" เพื่อบอกว่าให้ FE วาดเอง
-    db_doc = Document(
-        case_id=case_id,
-        doc_type=doc_type,
-        doc_no=doc_no,
-        amount=db_case.requested_amount,
-        pdf_uri="client-render", # <--- เปลี่ยนตรงนี้
-        created_by=current_user.username
-    )
-    db.add(db_doc)
+    # ดึงเลขเดิมมาแสดงใน Response
+    doc = db.execute(select(Document).filter_by(case_id=case_id)).scalar_one_or_none()
+    doc_no = doc.doc_no if doc else "N/A"
 
     old_status = db_case.status
     db_case.status = new_status
@@ -174,17 +185,16 @@ async def approve_case(
     db.commit()
     log_audit_event(
         db, "case", case_id, "approve", current_user.username, 
-        {"old_status": old_status.value, "new_status": new_status.value, "doc_type": doc_type.value, "doc_no": doc_no}
+        {"old_status": old_status.value, "new_status": new_status.value, "doc_no": doc_no}
     )
 
     return WorkflowResponse(
-        message=f"Case Approved. {doc_type.value} {doc_no} Generated (Virtual).",
+        message=f"Case Approved ({doc_no})",
         case_id=str(case_id),
         status=new_status.value,
         doc_no=doc_no
     )
 
-# ... (Endpoints Pay, Close, Read คงเดิม) ...
 @router.post("/{case_id}/pay", response_model=WorkflowResponse)
 async def mark_paid(
     case_id: UUID,
@@ -201,40 +211,56 @@ async def mark_paid(
     db.commit()
     return WorkflowResponse(message="Case marked as PAID.", case_id=str(case_id), status="PAID")
 
-@router.post("/{case_id}/close", response_model=WorkflowResponse)
-async def close_case(
-    case_id: UUID,
-    current_user: Annotated[UserInDB, Depends(has_role([Role.REQUESTER, Role.ADMIN]))],
-    db: Session = Depends(get_db)
-):
-    db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
-    if not db_case: raise HTTPException(404, "Case not found")
-    if db_case.status != CaseStatus.PAID: raise HTTPException(409, "Case must be PAID to close.")
-    if db_case.requester_id != current_user.username and Role.ADMIN not in current_user.roles: raise HTTPException(403, "Not authorized.")
-    
-    if not db_case.is_receipt_uploaded:
-        raise HTTPException(400, "Cannot close case: Receipt not uploaded yet.")
-
-    db_case.status = CaseStatus.CLOSED
-    db_case.updated_by = current_user.username
-    db_case.updated_at = datetime.now(timezone.utc)
-    db.commit()
-    return WorkflowResponse(message="Case CLOSED successfully.", case_id=str(case_id), status="CLOSED")
-
-@router.get("/", response_model=List[CaseResponse])
+# --- ✅ แก้ไข: เหลือ read_cases ตัวเดียว และดึงข้อมูลครบถ้วน ---
+@router.get("/", response_model=List[CaseAdminView])
 async def read_cases(
     current_user: Annotated[UserInDB, Depends(get_current_user)],
     db: Session = Depends(get_db),
     status: Optional[CaseStatus] = None
 ):
-    query = select(Case)
-    conditions = []
+    # Query: Case + Document(Optional) + User(Optional)
+    query = (
+        select(
+            Case.id,
+            Case.case_no,
+            Case.purpose.label("description"),
+            Case.requested_amount,
+            Case.created_at,
+            Case.status,
+            Case.department_id.label("department"),
+            Document.doc_no,
+            User.name.label("requester_name")
+        )
+        .outerjoin(Document, Case.id == Document.case_id)
+        .outerjoin(User, Case.requester_id == User.email) # ⚠️ ตรวจสอบว่า requester_id ใน Case เก็บ email ตรงกับ User.email ไหม
+    )
+
     can_see_all = any(role in current_user.roles for role in [Role.FINANCE, Role.ACCOUNTING, Role.ADMIN, Role.EXECUTIVE, Role.TREASURY])
-    if not can_see_all: conditions.append(Case.requester_id == current_user.username)
-    if status: conditions.append(Case.status == status)
-    if conditions: query = query.where(and_(*conditions))
+    if not can_see_all: 
+        query = query.where(Case.requester_id == current_user.username)
+    
+    if status: 
+        query = query.where(Case.status == status)
+    
     query = query.order_by(Case.created_at.desc())
-    return [CaseResponse.model_validate(c) for c in db.execute(query).scalars().all()]
+    
+    results = db.execute(query).all()
+    
+    mapped_results = []
+    for row in results:
+        mapped_results.append(CaseAdminView(
+            id=row.id,
+            case_no=row.case_no,
+            doc_no=row.doc_no if row.doc_no else "-",
+            requester_name=row.requester_name if row.requester_name else "Unknown",
+            description=row.description,
+            requested_amount=float(row.requested_amount),
+            created_at=row.created_at,
+            status=row.status.value,
+            department=row.department
+        ))
+        
+    return mapped_results
 
 @router.get("/{case_id}", response_model=CaseResponse)
 async def read_case(
