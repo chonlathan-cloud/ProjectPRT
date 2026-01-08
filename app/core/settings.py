@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
 
     # Phase 2/3 flags
-    USE_MOCK_DATA: bool = True
+    USE_MOCK_DATA: bool = False
 
     # CORS (local frontend dev)
     CORS_ALLOW_ORIGINS: List[str] = [

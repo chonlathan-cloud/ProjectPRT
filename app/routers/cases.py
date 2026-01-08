@@ -11,8 +11,8 @@ from app.db import get_db
 from app.deps import Role, has_role, get_current_user, UserInDB
 from app.models import (
     Category, Case, CaseStatus, Document, DocCounter, 
-    DocumentType, CategoryType, User, WorkflowResponse
-)
+    DocumentType, CategoryType, User)
+from app.schemas.workflow import WorkflowResponse
 from app.schemas.case import CaseCreate, CaseResponse
 from app.services.audit import log_audit_event
 from pydantic import BaseModel

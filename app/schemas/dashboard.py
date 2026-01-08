@@ -32,3 +32,18 @@ class DashboardData(BaseModel):
 
 class DashboardResponse(ResponseEnvelope):
     data: DashboardData
+
+class RecentTransaction(BaseModel):
+    id: str
+    doc_no: str
+    description: str
+    amount: float
+    date: str
+    status: str
+    requester: str
+
+class DashboardStats(BaseModel):
+    total_income: float
+    total_expense: float
+    balance: float
+    recent_transactions: List[RecentTransaction]

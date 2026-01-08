@@ -6,7 +6,7 @@ from datetime import datetime, date
 
 from app.db import get_db
 from app.rbac import require_roles, ROLE_ADMIN, ROLE_ACCOUNTANT, ROLE_VIEWER
-from app.models import Document, DocumentType, Case, Category
+from app.models import Document, DocumentType, Case, Category, CaseStatus
 from app.schemas.common import make_success_response
 from app.schemas.dashboard import (
     DashboardResponse, MonthlyData, ActivityData, TransactionItem
@@ -28,33 +28,45 @@ async def get_full_dashboard(
     if auth_error:
         return auth_error
 
-    # --- 2. เปลี่ยน Logic การดึงข้อมูลมาใช้ Document (PV/RV) ---
-
-    # A. Summary (รวมยอดรายรับ/รายจ่าย ทั้งปี)
-    # PV = รายจ่าย, RV = รายรับ
-    income_sum = db.query(func.sum(Document.amount)).filter(
+    # ---------------------------------------------------------
+    # Helper Filter: สร้างตัวแปรเก็บเงื่อนไขพื้นฐานไว้ใช้ซ้ำ
+    # กรองเฉพาะปีที่เลือก และ ตัดเคสที่ยกเลิก/ปฏิเสธ/ดราฟทิ้ง (แล้วแต่ Business logic ว่าจะนับสถานะไหนบ้าง)
+    # ในที่นี้สมมติว่านับเฉพาะที่ APPROVED หรือ PAID แล้ว หรืออย่างน้อยต้องไม่ Cancelled
+    base_filter = [
         extract('year', Document.created_at) == year,
-        Document.doc_type == DocumentType.RV
-    ).scalar() or 0.0
+        Case.status.notin_([CaseStatus.DRAFT, CaseStatus.CANCELLED, CaseStatus.REJECTED]) # <--- สำคัญ!
+    ]
+    # ---------------------------------------------------------
 
-    expense_sum = db.query(func.sum(Document.amount)).filter(
-        extract('year', Document.created_at) == year,
-        Document.doc_type == DocumentType.PV
-    ).scalar() or 0.0
+    # A. Summary
+    # ต้อง Join Case เพื่อเช็ค Status
+    income_sum = db.query(func.sum(Document.amount))\
+        .join(Case, Document.case_id == Case.id)\
+        .filter(
+            *base_filter,
+            Document.doc_type == DocumentType.RV
+        ).scalar() or 0.0
+
+    expense_sum = db.query(func.sum(Document.amount))\
+        .join(Case, Document.case_id == Case.id)\
+        .filter(
+            *base_filter,
+            Document.doc_type == DocumentType.PV
+        ).scalar() or 0.0
 
     balance = float(income_sum) - float(expense_sum)
 
-    # B. Monthly Stats (กราฟแท่งรายจ่ายรายเดือน)
-    # ดึงเฉพาะ PV (รายจ่าย) มาพล็อตลงกราฟ
+    # B. Monthly Stats (PV Only)
     monthly_data = db.query(
         extract('month', Document.created_at).label('month'),
         func.sum(Document.amount).label('total')
-    ).filter(
-        extract('year', Document.created_at) == year,
+    ).join(Case, Document.case_id == Case.id)\
+     .filter(
+        *base_filter,
         Document.doc_type == DocumentType.PV
     ).group_by('month').all()
 
-    # Map ผลลัพธ์ให้ครบ 12 เดือน (กันเดือนไหนไม่มีข้อมูลจะเป็น 0)
+    # ... (ส่วน Mapping เดือน เหมือนเดิม) ...
     months_map = {int(m): float(v) for m, v in monthly_data}
     months_name = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
     monthly_stats = []
@@ -62,18 +74,18 @@ async def get_full_dashboard(
         val = months_map.get(i + 1, 0.0)
         monthly_stats.append(MonthlyData(name=name, value=val))
 
-    # C. Activity Stats (วงกลมแบ่งตามหมวดหมู่รายจ่าย)
-    # ต้อง Join: Document -> Case -> Category
+    # C. Activity Stats (Category)
     cat_data = db.query(
         Category.name_th,
         func.sum(Document.amount)
     ).join(Case, Document.case_id == Case.id)\
      .join(Category, Case.category_id == Category.id)\
      .filter(
-        extract('year', Document.created_at) == year,
+        *base_filter,
         Document.doc_type == DocumentType.PV
      ).group_by(Category.name_th).all()
 
+    # ... (ส่วนสีและ Loop เหมือนเดิม) ...
     colors = ["#8884d8", "#82ca9d", "#ffc658", "#ff8042", "#0088fe", "#00C49F"]
     activity_stats = []
     for i, (name, val) in enumerate(cat_data):
@@ -83,25 +95,23 @@ async def get_full_dashboard(
             fill=colors[i % len(colors)]
         ))
 
-    # D. Latest Transactions (รายการล่าสุด 5 อันดับ)
-    # ดึงทั้ง PV และ RV
+    # D. Latest Transactions
     latest_docs = db.query(Document, Case, Category)\
         .join(Case, Document.case_id == Case.id)\
         .join(Category, Case.category_id == Category.id)\
-        .filter(extract('year', Document.created_at) == year)\
+        .filter(*base_filter)\
         .order_by(desc(Document.created_at))\
         .limit(5).all()
 
+    # ... (ส่วน Loop latest_transactions เหมือนเดิม) ...
     latest_transactions = []
     for doc, case, cat in latest_docs:
-        # แปลงเป็น Model ที่ Frontend รู้จัก
         initial_char = "P" if doc.doc_type == DocumentType.PV else "R"
-        
         latest_transactions.append(TransactionItem(
             id=str(doc.id),
             initial=initial_char, 
-            name=cat.name_th, # ชื่อหมวดหมู่
-            description=f"{doc.doc_no} - {case.purpose}", # เลขเอกสาร + รายละเอียด
+            name=cat.name_th,
+            description=f"{doc.doc_no} - {case.purpose}",
             amount=float(doc.amount)
         ))
 
