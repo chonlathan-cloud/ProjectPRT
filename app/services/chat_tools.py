@@ -41,7 +41,11 @@ def get_financial_analytics_tool(
         select(Document)
         .join(Case, Document.case_id == Case.id) # เปลี่ยนเป็น Inner Join เพื่อความชัวร์เรื่อง Status
         .join(Category, Case.category_id == Category.id)
-        .filter(Case.status == CaseStatus.APPROVED) # ✅✅✅ กรองเฉพาะที่อนุมัติแล้วเท่านั้น!
+        .filter(Case.status.in_([
+            CaseStatus.APPROVED, 
+            CaseStatus.PAID, 
+            CaseStatus.CLOSED
+        ])) # ✅✅✅ all status ที่ผ่านการอนุมัติแล้ว
     )
 
     # 2. Filter Transaction Type (กรองประเภทเอกสาร)
