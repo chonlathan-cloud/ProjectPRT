@@ -10,9 +10,12 @@ from app.schemas.common import make_error_response
 
 ROLE_ADMIN = "admin"
 ROLE_ACCOUNTANT = "accounting"
+ROLE_FINANCE = "finance"      # <--- เพิ่ม
+ROLE_TREASURY = "treasury"    # <--- เพิ่ม
 ROLE_REQUESTER = "requester"
+ROLE_EXECUTIVE = "executive"  # <--- เพิ่ม (ตัวต้นเหตุ Error)
 ROLE_VIEWER = "viewer"
-ALL_ROLES = {ROLE_ADMIN, ROLE_ACCOUNTANT, ROLE_REQUESTER, ROLE_VIEWER}
+ALL_ROLES = {ROLE_ADMIN, ROLE_ACCOUNTANT, ROLE_FINANCE, ROLE_TREASURY, ROLE_REQUESTER, ROLE_EXECUTIVE, ROLE_VIEWER}
 
 
 def get_current_user(db: Session, request: Request) -> Tuple[User | None, JSONResponse | None]:

@@ -22,13 +22,13 @@ router = APIRouter(
     tags=["Cases"]
 )
 
-# ✅ Model พิเศษสำหรับหน้า Admin/Dashboard ที่ต้องการข้อมูลเยอะๆ
+# ✅ Model พิเศษสำหรับหน้า Admin/Dashboard
 class CaseAdminView(BaseModel):
     id: UUID
     case_no: str
-    doc_no: Optional[str] = None  # เลขที่เอกสาร (PV/RV)
-    requester_name: str           # ชื่อจริงผู้ขอเบิก
-    description: str              # รายละเอียด (purpose)
+    doc_no: Optional[str] = None
+    requester_name: str
+    description: str
     requested_amount: float
     created_at: datetime
     status: str
@@ -44,7 +44,6 @@ def generate_case_no() -> str:
     return f"CAS-{today_str}-{unique_suffix}"
 
 def _generate_document_no(db: Session, doc_prefix_enum: DocumentType) -> str:
-    # ล็อคแถวเพื่อป้องกันเลขซ้ำ (Concurrency Control)
     current_ym = datetime.now(timezone.utc).strftime("%y%m")
     doc_counter = db.execute(
         select(DocCounter).filter_by(doc_prefix=doc_prefix_enum, year_month=current_ym).with_for_update()
@@ -110,52 +109,62 @@ async def submit_case(
     current_user: Annotated[UserInDB, Depends(has_role([Role.REQUESTER]))],
     db: Session = Depends(get_db)
 ):
-    with db.begin(): # Transaction Start
-        db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
-        if not db_case: raise HTTPException(404, "Case not found.")
-        
-        if db_case.requester_id != current_user.username: raise HTTPException(403, "Not authorized.")
-        if db_case.status != CaseStatus.DRAFT: raise HTTPException(409, "Only DRAFT cases can be submitted.")
+    # ✅ แก้ไข 1: ลบ with db.begin() ออก เพื่อแก้ Error 500 (Transaction ซ้อน)
+    db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
+    if not db_case: raise HTTPException(404, "Case not found.")
+    
+    if db_case.requester_id != current_user.username: raise HTTPException(403, "Not authorized.")
+    if db_case.status != CaseStatus.DRAFT: raise HTTPException(409, "Only DRAFT cases can be submitted.")
 
-        # --- ✅ GEN DOCUMENT NO (ย้ายมาตรงนี้ถูกต้องแล้ว) ---
-        category = db.execute(select(Category).filter_by(id=db_case.category_id)).scalar_one()
-        
-        doc_type = DocumentType.PV if category.type == CategoryType.EXPENSE else DocumentType.RV
+    # --- Gen Document No ---
+    category = db.execute(select(Category).filter_by(id=db_case.category_id)).scalar_one()
+    
+    # ✅ แก้ไข 2: เพิ่ม Logic สำหรับ JV (ถ้าไม่ใช่ Expense/Revenue ให้เป็น JV)
+    if category.type == CategoryType.EXPENSE:
+        doc_type = DocumentType.PV
+    elif category.type == CategoryType.REVENUE:
+        doc_type = DocumentType.RV
+    else:
+        doc_type = DocumentType.JV  # ครอบคลุม ASSET และอื่นๆ
+
+    # ตรวจสอบว่ามีเอกสารเดิมไหม
+    existing_doc = db.execute(select(Document).filter_by(case_id=case_id)).scalar_one_or_none()
+    
+    if not existing_doc:
         doc_no = _generate_document_no(db, doc_type)
-        
-        # Check existing to be safe
-        existing_doc = db.execute(select(Document).filter_by(case_id=case_id)).scalar_one_or_none()
-        if not existing_doc:
-            new_doc = Document(
-                case_id=case_id,
-                doc_type=doc_type,
-                doc_no=doc_no,
-                amount=db_case.requested_amount,
-                pdf_uri="pending-approval", 
-                created_by=current_user.username
-            )
-            db.add(new_doc)
-        else:
-            doc_no = existing_doc.doc_no # กรณีมีอยู่แล้ว (อาจจะ re-submit) ให้ใช้เลขเดิม
-
-        old_status = db_case.status
-        db_case.status = CaseStatus.SUBMITTED
-        db_case.updated_by = current_user.username
-        db_case.updated_at = datetime.now(timezone.utc)
-        
-        db.flush()
-        
-        log_audit_event(
-            db, "case", db_case.id, "submit_and_gen_no", current_user.username, 
-            {"old": old_status.value, "new": db_case.status.value, "doc_no": doc_no}
+        new_doc = Document(
+            case_id=case_id,
+            doc_type=doc_type,
+            doc_no=doc_no,
+            amount=db_case.requested_amount,
+            pdf_uri="pending-approval", 
+            created_by=current_user.username
         )
+        db.add(new_doc)
+        db.flush() # สำคัญ: flush เพื่อให้ new_doc เข้า session
+    else:
+        doc_no = existing_doc.doc_no
 
-        return WorkflowResponse(
-            message=f"Submitted. Generated {doc_no}", 
-            case_id=str(db_case.id), 
-            status=db_case.status.value,
-            doc_no=doc_no
-        )
+    old_status = db_case.status
+    db_case.status = CaseStatus.SUBMITTED
+    db_case.updated_by = current_user.username
+    db_case.updated_at = datetime.now(timezone.utc)
+    
+    log_audit_event(
+        db, "case", db_case.id, "submit_and_gen_no", current_user.username, 
+        {"old": old_status.value, "new": db_case.status.value, "doc_no": doc_no}
+    )
+
+    # ✅ แก้ไข 3: Commit ปิดท้าย
+    db.commit() 
+    db.refresh(db_case)
+
+    return WorkflowResponse(
+        message=f"Submitted. Generated {doc_no}", 
+        case_id=str(db_case.id), 
+        status=db_case.status.value,
+        doc_no=doc_no
+    )
 
 @router.post("/{case_id}/approve", response_model=WorkflowResponse)
 async def approve_case(
@@ -169,11 +178,10 @@ async def approve_case(
     if db_case.status != CaseStatus.SUBMITTED:
         raise HTTPException(409, f"Case must be SUBMITTED to approve.")
 
-    # --- ✅ แก้ไข: ไม่ต้อง Gen เลขใหม่แล้ว แค่เปลี่ยน Status ---
     category = db.execute(select(Category).filter_by(id=db_case.category_id)).scalar_one()
+    # ถ้าเป็น Expense -> Approved (รอจ่ายเงิน), ถ้าเป็น Revenue/Asset -> Closed (จบงานเลย)
     new_status = CaseStatus.APPROVED if category.type == CategoryType.EXPENSE else CaseStatus.CLOSED
 
-    # ดึงเลขเดิมมาแสดงใน Response
     doc = db.execute(select(Document).filter_by(case_id=case_id)).scalar_one_or_none()
     doc_no = doc.doc_no if doc else "N/A"
 
@@ -211,14 +219,12 @@ async def mark_paid(
     db.commit()
     return WorkflowResponse(message="Case marked as PAID.", case_id=str(case_id), status="PAID")
 
-# --- ✅ แก้ไข: เหลือ read_cases ตัวเดียว และดึงข้อมูลครบถ้วน ---
 @router.get("/", response_model=List[CaseAdminView])
 async def read_cases(
     current_user: Annotated[UserInDB, Depends(get_current_user)],
     db: Session = Depends(get_db),
     status: Optional[CaseStatus] = None
 ):
-    # Query: Case + Document(Optional) + User(Optional)
     query = (
         select(
             Case.id,
@@ -232,7 +238,7 @@ async def read_cases(
             User.name.label("requester_name")
         )
         .outerjoin(Document, Case.id == Document.case_id)
-        .outerjoin(User, Case.requester_id == User.email) # ⚠️ ตรวจสอบว่า requester_id ใน Case เก็บ email ตรงกับ User.email ไหม
+        .outerjoin(User, Case.requester_id == User.email)
     )
 
     can_see_all = any(role in current_user.roles for role in [Role.FINANCE, Role.ACCOUNTING, Role.ADMIN, Role.EXECUTIVE, Role.TREASURY])
