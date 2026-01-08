@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Request, Depends, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import func, desc, extract
+from sqlalchemy import func, desc, extract, select
 from datetime import datetime, timedelta, date
 from typing import List
 
