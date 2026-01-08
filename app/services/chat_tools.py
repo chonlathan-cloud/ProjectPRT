@@ -1,6 +1,6 @@
 from datetime import datetime
 from sqlalchemy.orm import Session
-from sqlalchemy import select, func, and_
+from sqlalchemy import select, func, and_, or_
 from app.models import Document, DocumentType, Case, Category, Attachment
 
 def search_documents_tool(db: Session, keyword: str):
@@ -24,65 +24,83 @@ def search_documents_tool(db: Session, keyword: str):
     return "\n".join(output)
 
 
-def get_expense_analytics_tool(db: Session, start_date: str = None, end_date: str = None, category_name: str = None):
+def get_financial_analytics_tool(
+    db: Session, 
+    start_date: str = None, 
+    end_date: str = None, 
+    category_name: str = None,
+    transaction_type: str = "EXPENSE" # ✅ เพิ่ม Parameter นี้ (EXPENSE | REVENUE | ALL)
+):
     """
-    วิเคราะห์ยอดใช้จ่ายจริง (จาก PV)
+    วิเคราะห์ข้อมูลการเงิน (รองรับทั้ง รายรับ-RV และ รายจ่าย-PV)
     """
-    # ❌ ของเดิม (สาเหตุ Error)
-    # query = select(func.sum(Document.amount)).join(Case).join(Category)
-
-    # ✅ ของใหม่ (ระบุชัดเจนว่า join ผ่าน category_id)
-    query = (
-        select(func.sum(Document.amount))
-        .join(Case, Document.case_id == Case.id) # Join Case ก่อน (กันเหนียว)
-        .join(Category, Case.category_id == Category.id) # <--- ระบุเงื่อนไขตรงนี้ชัดๆ
-    )
     
-    # [NEW] เพิ่ม Query เพื่อดึง 5 รายการล่าสุดที่เกี่ยวข้อง
-    detail_query = (
-        select(Document.id, Document.doc_no, Document.amount, Document.created_at, Category.name_th)
-        .join(Case, Document.case_id == Case.id)
-        .join(Category, Case.category_id == Category.id)
-        .filter(Document.doc_type == DocumentType.PV)
+    # 1. Base Query: ใช้ Outer Join เพื่อความปลอดภัย (เผื่อบาง Doc ไม่มี Case)
+    base_query = (
+        select(Document)
+        .outerjoin(Case, Document.case_id == Case.id)
+        .outerjoin(Category, Case.category_id == Category.id)
     )
 
-    query = query.filter(Document.doc_type == DocumentType.PV) # เฉพาะรายจ่ายจริง
+    # 2. Filter Transaction Type (กรองประเภทเอกสาร)
+    if transaction_type == "EXPENSE":
+        base_query = base_query.filter(Document.doc_type == DocumentType.PV)
+        type_label = "รายจ่าย (PV)"
+    elif transaction_type == "REVENUE":
+        base_query = base_query.filter(Document.doc_type == DocumentType.RV)
+        type_label = "รายรับ (RV)"
+    else:
+        # กรณี ALL หรืออื่นๆ (เอาทั้งคู่)
+        base_query = base_query.filter(or_(
+            Document.doc_type == DocumentType.PV, 
+            Document.doc_type == DocumentType.RV
+        ))
+        type_label = "รายรับ-รายจ่าย"
 
-    recent_docs = db.execute(detail_query.order_by(Document.created_at.desc()).limit(5)).all()
-    
-    #แปลงข้อมูลเป็น list ของ string
-    doc_list = []
-    for doc in recent_docs:
-        doc_list.append(f"- {doc.doc_no}: {doc.amount:,.2f} บาท ({doc.name_th})")
+    # 3. Apply Date & Category Filters
     if start_date:
-        # แปลง string เป็น date เพื่อความชัวร์ (บางทีมาแค่ YYYY-MM-DD)
         try:
             s_date = datetime.strptime(start_date, "%Y-%m-%d")
-            query = query.filter(Document.created_at >= s_date)
-        except ValueError:
-            pass # หรือ handle error ตามเหมาะสม
+            base_query = base_query.filter(Document.created_at >= s_date)
+        except ValueError: pass
 
     if end_date:
         try:
             e_date = datetime.strptime(end_date, "%Y-%m-%d")
-            # ควรปรับเวลาให้ครอบคลุมถึงสิ้นวัน (23:59:59) ถ้าจำเป็น
-            query = query.filter(Document.created_at <= e_date)
-        except ValueError:
-            pass
+            e_date = e_date.replace(hour=23, minute=59, second=59)
+            base_query = base_query.filter(Document.created_at <= e_date)
+        except ValueError: pass
 
     if category_name:
-        query = query.filter(Category.name_th.ilike(f"%{category_name}%"))
+        # ค้นหาจากชื่อ Category (เช่น "ค่าเดินทาง", "รายได้จากการขาย")
+        base_query = base_query.filter(Category.name_th.ilike(f"%{category_name}%"))
 
-    # ... (ส่วน return เหมือนเดิม) ...
-    total = db.execute(query).scalar() or 0.0
-    
-    breakdown_text = ""
-    if category_name:
-        breakdown_text = f" (เฉพาะหมวดที่มีคำว่า '{category_name}')"
-    
+    # 4. Calculate Total
+    total_query = select(func.sum(Document.amount)).select_from(base_query.subquery())
+    total = db.execute(total_query).scalar() or 0.0
+
+    # 5. Get List Items
+    items_query = base_query.order_by(Document.created_at.desc()).limit(5)
+    items = db.execute(items_query).scalars().all()
+
+    doc_list = []
+    for doc in items:
+        # Safe Access Category Name
+        cat_name = "-"
+        if doc.case and doc.case.category:
+            cat_name = doc.case.category.name_th
+        
+        # ใส่สัญลักษณ์ +/- หรือระบุประเภทให้ชัดเจน
+        prefix = "+" if doc.doc_type == DocumentType.RV else "-"
+        doc_list.append(f"{prefix} {doc.doc_no}: {doc.amount:,.2f} บาท ({cat_name})")
+
+    if not doc_list and total > 0:
+        doc_list.append("(มีรายการย่อยมากกว่านี้ แต่แสดงได้สูงสุด 5 รายการ)")
+
     return {
-        "total_expense": float(total),
-        "period": f"{start_date} to {end_date}",
+        "transaction_type": transaction_type,
+        "total_amount": float(total),
+        "period": f"{start_date or 'N/A'} to {end_date or 'N/A'}",
         "breakdown": doc_list,
-        "note": f"ยอดรวมจากเอกสาร PV"
+        "note": f"ยอดรวม{type_label} ตามเอกสารที่อนุมัติแล้ว"
     }

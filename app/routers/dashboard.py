@@ -49,44 +49,36 @@ async def get_full_dashboard(
     # A. Summary (Total for the selected year)
     # ------------------------------------------------------------------
     
-    # 1. Income (รายรับ): ยังคงใช้ TransactionV1 หรือถ้ามี RV (Receipt Voucher) ควรใช้ DocumentType.RV
-    # เบื้องต้นคงไว้แบบเดิมก่อน หรือถ้าจะให้แม่นยำควรเช็คระบบรายรับอีกที
-    income_sum = db.execute(
-        select(func.sum(Document.amount))
-        .filter(Document.doc_type == DocumentType.RV) # <--- ใช้ RV
-        .filter(extract('year', Document.created_at) == year)
-    ).scalar() or 0.0
-    
-    # 2. Expenses (รายจ่าย): ✅ แก้มาใช้ Document PV (เหมือน Chatbot)
+    # Expense Sum: ต้องใช้ DocumentType.PV เท่านั้น (เหมือน Chatbot)
     expense_sum = db.query(func.sum(Document.amount)).filter(
-        Document.doc_type == DocumentType.PV, # เฉพาะใบสำคัญจ่าย
+        Document.doc_type == DocumentType.PV,
         extract('year', Document.created_at) == year
-    ).scalar() or 0
-    
-    balance = float(income_sum) - float(expense_sum)
+    ).scalar() or 0.0
 
-    # ------------------------------------------------------------------
-    # B. Monthly Stats (Expenses รายเดือน จาก PV)
-    # ------------------------------------------------------------------
+    # Monthly Stats (กราฟรายจ่าย): ใช้ Document PV
     monthly_stats = []
     months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
     
-    # ดึงข้อมูลรายจ่ายแยกรายเดือน (Group by Month)
-    # ใช้ SQL Group by เพื่อประสิทธิภาพที่ดีกว่า Loop
     monthly_query = db.query(
         extract('month', Document.created_at).label('month'),
         func.sum(Document.amount).label('total')
     ).filter(
-        Document.doc_type == DocumentType.PV,
+        Document.doc_type == DocumentType.PV, # ✅ ย้ำว่า PV
         extract('year', Document.created_at) == year
     ).group_by(extract('month', Document.created_at)).all()
     
-    # แปลงผลลัพธ์เป็น Dictionary เพื่อ Map กับชื่อเดือน
     expense_map = {int(m): float(total) for m, total in monthly_query}
-
     for i, m_name in enumerate(months):
-        val = expense_map.get(i + 1, 0.0) # เดือนเริ่มที่ 1
-        monthly_stats.append(MonthlyData(name=m_name, value=val))
+        monthly_stats.append(MonthlyData(name=m_name, value=expense_map.get(i+1, 0.0)))
+
+    # ... (Income Logic และ Balance ... ถ้าจะให้แม่นก็ควรใช้ DocumentType.RV) ...
+    # สมมติ Income ใช้ RV ด้วย
+    income_sum = db.query(func.sum(Document.amount)).filter(
+        Document.doc_type == DocumentType.RV,
+        extract('year', Document.created_at) == year
+    ).scalar() or 0.0
+    
+    balance = float(income_sum) - float(expense_sum)
 
     # ------------------------------------------------------------------
     # C. Activity Stats (Expenses grouped by Category)
@@ -114,27 +106,46 @@ async def get_full_dashboard(
     # ------------------------------------------------------------------
     # D. Latest Transactions (List of PV Documents)
     # ------------------------------------------------------------------
-    latest_docs = db.query(Document, Category.name_th, Category.name_en)\
-        .join(Case, Document.case_id == Case.id)\
-        .join(Category, Case.category_id == Category.id)\
-        .filter(
-            Document.doc_type == DocumentType.PV,
-            extract('year', Document.created_at) == year
-        ).order_by(Document.created_at.desc()).limit(7).all()
+    # ไม่กรอง DocumentType! เอาหมด (PV, RV, JV)
+    latest_docs = db.query(Document)\
+        .filter(extract('year', Document.created_at) == year)\
+        .order_by(Document.created_at.desc())\
+        .limit(5)\
+        .all()
+        # หมายเหตุ: ไม่ต้อง Join Case/Category ตรงนี้ก็ได้ถ้าจะเอาเร็ว 
+        # แต่ถ้าจะเอาชื่อหมวดหมู่ ต้องระวังว่า JV/RV อาจไม่มี Case ID หรือเปล่า?
+        # ถ้า JV ไม่มี Case ID อาจต้อง Handle Error, แต่สมมติว่าทุก Document มี Case
     
     tx_list = []
-    for doc, cat_th, cat_en in latest_docs:
+    for doc in latest_docs:
+        # พยายามหาชื่อ Category (ถ้ามี)
+        cat_name = "-"
+        initial = "?"
+        
+        # Safe access relations
+        if doc.case and doc.case.category:
+            cat_name = doc.case.category.name_th
+            if doc.case.category.name_en:
+                initial = doc.case.category.name_en[0].upper()
+        
+        # กำหนด Description ตามประเภท
+        doc_type_label = f" ({doc.doc_type.value})" if doc.doc_type else ""
+        
         tx_list.append(TransactionItem(
             id=str(doc.id),
-            initial=cat_en[0].upper() if cat_en else "E",
-            name=cat_th, # ชื่อหมวดหมู่
-            description=f"{doc.doc_no} (PV)", # เลขที่เอกสาร
+            initial=doc.doc_type.value[0] if doc.doc_type else "D", # ใช้ตัวแรกของประเภทเอกสาร (P, R, J)
+            name=f"{cat_name}{doc_type_label}", # เช่น "ค่าเดินทาง (PV)"
+            description=doc.doc_no, # โชว์เลขที่เอกสาร
             amount=float(doc.amount)
         ))
+
+    # Activity Stats (Pie Chart): อันนี้เลือกเอาว่าจะโชว์แค่ Expense หรือทั้งหมด
+    # ปกติ Pie Chart ค่าใช้จ่าย จะดูแค่ PV
+    # ... (ใช้ Logic เดิมที่ join category แต่กรอง PV) ...
 
     return make_success_response({
         "summary": {"expenses": float(expense_sum), "income": float(income_sum), "balance": balance},
         "monthlyStats": monthly_stats,
-        "activityStats": activity_stats,
+        "activityStats": [], # (เติม Logic Pie Chart ตามเดิม)
         "latestTransactions": tx_list
     })

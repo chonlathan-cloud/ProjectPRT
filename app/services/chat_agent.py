@@ -3,10 +3,8 @@ from vertexai.generative_models import GenerativeModel, Tool, FunctionDeclaratio
 from sqlalchemy.orm import Session
 from datetime import datetime
 import logging
-
+from app.services.chat_tools import search_documents_tool, get_financial_analytics_tool
 from app.core.settings import settings
-from app.services.chat_tools import search_documents_tool, get_expense_analytics_tool
-
 # ตั้งค่า Logger
 logger = logging.getLogger(__name__)
 
@@ -30,15 +28,22 @@ search_tool = FunctionDeclaration(
 )
 
 analytics_tool = FunctionDeclaration(
-    name="get_expense_analytics",
-    description="Calculate total approved expenses (PV) from database.",
+    name="get_financial_analytics", # เปลี่ยนชื่อให้สื่อความหมาย
+    description="Get total financial amount (Income/Expense) from database documents (PV/RV).",
     parameters={
         "type": "object",
         "properties": {
             "start_date": {"type": "string", "description": "Start date YYYY-MM-DD"},
             "end_date": {"type": "string", "description": "End date YYYY-MM-DD"},
-            "category_name": {"type": "string", "description": "Category name to filter e.g. 'Travel', 'Equipment'"}
-        }
+            "category_name": {"type": "string", "description": "Category filter e.g. 'Sales', 'Travel'"},
+            "transaction_type": {
+                "type": "string", 
+                "enum": ["EXPENSE", "REVENUE", "ALL"],
+                "description": "Type of transaction. Use 'REVENUE' for income/sales, 'EXPENSE' for costs/spending."
+            }
+        },
+        # บังคับให้ AI ต้องคิดว่าจะดู Expense หรือ Revenue
+        "required": ["transaction_type"] 
     }
 )
 
@@ -110,12 +115,13 @@ class PRTChatAgent:
                 try:
                     if func_name == "search_documents":
                         api_result = search_documents_tool(db, keyword=func_args.get("keyword"))
-                    elif func_name == "get_expense_analytics":
-                        api_result = get_expense_analytics_tool(
+                    elif func_name == "get_financial_analytics":
+                        api_result = get_financial_analytics_tool(
                             db, 
                             start_date=func_args.get("start_date"),
                             end_date=func_args.get("end_date"),
-                            category_name=func_args.get("category_name")
+                            category_name=func_args.get("category_name"),
+                            transaction_type=func_args.get("transaction_type", "EXPENSE") # Default เป็นรายจ่ายถ้า AI ลืมส่ง
                         )
                 except Exception as tool_err:
                     logger.error(f"Tool Error: {tool_err}")
