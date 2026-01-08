@@ -47,7 +47,7 @@ async def get_full_dashboard(
 
     # 2. Define Constants
     # สถานะที่ถือว่าเงิน "ถูกใช้ไปแล้ว" หรือ "ได้รับแล้ว" จริงๆ
-    VALID_STATUSES = [CaseStatus.APPROVED, CaseStatus.PAID, CaseStatus.CLOSED]
+    VALID_STATUSES = [CaseStatus.APPROVED]
 
     # =========================================================
     # A. Summary Stats (Income, Expense, Balance)
