@@ -6,7 +6,7 @@ from typing import List
 
 from app.db import get_db
 from app.rbac import require_roles, ROLE_ADMIN, ROLE_ACCOUNTANT, ROLE_VIEWER
-from app.models import Document, DocumentType, Case, Category, TransactionV1 # ✅ Import models ที่ถูกต้อง
+from app.models import Document, DocumentType, Case, Category, TransactionV1, CaseStatus # ✅ Import models ที่ถูกต้อง
 from app.schemas.common import make_success_response
 from app.schemas.dashboard import (
     DashboardResponse, DashboardData, SummaryData, 
@@ -50,102 +50,92 @@ async def get_full_dashboard(
     # ------------------------------------------------------------------
     
     # Expense Sum: ต้องใช้ DocumentType.PV เท่านั้น (เหมือน Chatbot)
-    expense_sum = db.query(func.sum(Document.amount)).filter(
-        Document.doc_type == DocumentType.PV,
-        extract('year', Document.created_at) == year
-    ).scalar() or 0.0
+    expense_sum = db.query(func.sum(Document.amount))\
+        .join(Case, Document.case_id == Case.id)\
+        .filter(
+            Document.doc_type == DocumentType.PV,
+            Case.status == CaseStatus.APPROVED, # ✅✅ Approved Only
+            extract('year', Document.created_at) == year
+        ).scalar() or 0.0
 
-    # Monthly Stats (กราฟรายจ่าย): ใช้ Document PV
-    monthly_stats = []
-    months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-    
-    monthly_query = db.query(
-        extract('month', Document.created_at).label('month'),
-        func.sum(Document.amount).label('total')
-    ).filter(
-        Document.doc_type == DocumentType.PV, # ✅ ย้ำว่า PV
-        extract('year', Document.created_at) == year
-    ).group_by(extract('month', Document.created_at)).all()
-    
-    expense_map = {int(m): float(total) for m, total in monthly_query}
-    for i, m_name in enumerate(months):
-        monthly_stats.append(MonthlyData(name=m_name, value=expense_map.get(i+1, 0.0)))
-
-    # ... (Income Logic และ Balance ... ถ้าจะให้แม่นก็ควรใช้ DocumentType.RV) ...
-    # สมมติ Income ใช้ RV ด้วย
-    income_sum = db.query(func.sum(Document.amount)).filter(
-        Document.doc_type == DocumentType.RV,
-        extract('year', Document.created_at) == year
-    ).scalar() or 0.0
+    # Income (ถ้า RV ผูกกับ Case ก็ต้องทำเหมือนกัน)
+    # สมมติ RV ก็ต้อง Approved
+    income_sum = db.query(func.sum(Document.amount))\
+        .join(Case, Document.case_id == Case.id)\
+        .filter(
+            Document.doc_type == DocumentType.RV,
+            Case.status == CaseStatus.APPROVED, # ✅✅ Approved Only
+            extract('year', Document.created_at) == year
+        ).scalar() or 0.0
     
     balance = float(income_sum) - float(expense_sum)
 
-    # ------------------------------------------------------------------
-    # C. Activity Stats (Expenses grouped by Category)
-    # ------------------------------------------------------------------
-    # ต้อง Join: Document -> Case -> Category
-    activities = db.query(
-        Category.name_th, 
-        func.sum(Document.amount)
+    # =========================================================
+    # B. Monthly Stats (Graph)
+    # =========================================================
+    monthly_query = db.query(
+        extract('month', Document.created_at).label('month'),
+        func.sum(Document.amount).label('total')
     ).join(Case, Document.case_id == Case.id)\
-     .join(Category, Case.category_id == Category.id)\
      .filter(
         Document.doc_type == DocumentType.PV,
+        Case.status == CaseStatus.APPROVED, # ✅✅ Approved Only
         extract('year', Document.created_at) == year
-    ).group_by(Category.name_th).all()
+    ).group_by(extract('month', Document.created_at)).all()
     
-    colors = ["#8884d8", "#82ca9d", "#ffc658", "#ff8042", "#0088fe", "#00C49F"]
-    activity_stats = []
-    for i, (cat_name, val) in enumerate(activities):
-        activity_stats.append(ActivityData(
-            name=cat_name, 
-            value=float(val), 
-            fill=colors[i % len(colors)]
-        ))
+    # ... (Mapping Logic เหมือนเดิม) ...
+    monthly_stats = []
+    expense_map = {int(m): float(total) for m, total in monthly_query}
+    months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    for i, m_name in enumerate(months):
+        monthly_stats.append(MonthlyData(name=m_name, value=expense_map.get(i+1, 0.0)))
 
-    # ------------------------------------------------------------------
-    # D. Latest Transactions (List of PV Documents)
-    # ------------------------------------------------------------------
-    # ไม่กรอง DocumentType! เอาหมด (PV, RV, JV)
+    # =========================================================
+    # C. Activity Stats (Pie Chart)
+    # =========================================================
+    activities = db.query(Category.name_th, func.sum(Document.amount))\
+        .join(Case, Document.case_id == Case.id)\
+        .join(Category, Case.category_id == Category.id)\
+        .filter(
+            Document.doc_type == DocumentType.PV,
+            Case.status == CaseStatus.APPROVED, # ✅✅ Approved Only
+            extract('year', Document.created_at) == year
+        ).group_by(Category.name_th).all()
+        
+    # ... (Color & List Logic เหมือนเดิม) ...
+    activity_stats = []
+    colors = ["#8884d8", "#82ca9d", "#ffc658", "#ff8042", "#0088fe", "#00C49F"]
+    for i, (cat_name, val) in enumerate(activities):
+        activity_stats.append(ActivityData(name=cat_name, value=float(val), fill=colors[i % len(colors)]))
+
+    # =========================================================
+    # D. Latest Transactions
+    # =========================================================
     latest_docs = db.query(Document)\
-        .filter(extract('year', Document.created_at) == year)\
-        .order_by(Document.created_at.desc())\
-        .limit(5)\
-        .all()
-        # หมายเหตุ: ไม่ต้อง Join Case/Category ตรงนี้ก็ได้ถ้าจะเอาเร็ว 
-        # แต่ถ้าจะเอาชื่อหมวดหมู่ ต้องระวังว่า JV/RV อาจไม่มี Case ID หรือเปล่า?
-        # ถ้า JV ไม่มี Case ID อาจต้อง Handle Error, แต่สมมติว่าทุก Document มี Case
+        .join(Case, Document.case_id == Case.id)\
+        .filter(
+            Case.status == CaseStatus.APPROVED, # ✅✅ Approved Only
+            extract('year', Document.created_at) == year
+        ).order_by(Document.created_at.desc()).limit(5).all()
     
+    # ... (Transform Logic เหมือนเดิม) ...
     tx_list = []
     for doc in latest_docs:
-        # พยายามหาชื่อ Category (ถ้ามี)
-        cat_name = "-"
-        initial = "?"
-        
-        # Safe access relations
-        if doc.case and doc.case.category:
-            cat_name = doc.case.category.name_th
-            if doc.case.category.name_en:
-                initial = doc.case.category.name_en[0].upper()
-        
-        # กำหนด Description ตามประเภท
-        doc_type_label = f" ({doc.doc_type.value})" if doc.doc_type else ""
+        # Safe access
+        cat_name = doc.case.category.name_th if (doc.case and doc.case.category) else "-"
+        initial = doc.case.category.name_en[0] if (doc.case and doc.case.category and doc.case.category.name_en) else "D"
         
         tx_list.append(TransactionItem(
             id=str(doc.id),
-            initial=doc.doc_type.value[0] if doc.doc_type else "D", # ใช้ตัวแรกของประเภทเอกสาร (P, R, J)
-            name=f"{cat_name}{doc_type_label}", # เช่น "ค่าเดินทาง (PV)"
-            description=doc.doc_no, # โชว์เลขที่เอกสาร
+            initial=initial,
+            name=f"{cat_name} ({doc.doc_type.value})",
+            description=doc.doc_no,
             amount=float(doc.amount)
         ))
-
-    # Activity Stats (Pie Chart): อันนี้เลือกเอาว่าจะโชว์แค่ Expense หรือทั้งหมด
-    # ปกติ Pie Chart ค่าใช้จ่าย จะดูแค่ PV
-    # ... (ใช้ Logic เดิมที่ join category แต่กรอง PV) ...
 
     return make_success_response({
         "summary": {"expenses": float(expense_sum), "income": float(income_sum), "balance": balance},
         "monthlyStats": monthly_stats,
-        "activityStats": [], # (เติม Logic Pie Chart ตามเดิม)
+        "activityStats": activity_stats,
         "latestTransactions": tx_list
     })
