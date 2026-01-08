@@ -43,7 +43,7 @@ prt_tools = Tool(function_declarations=[search_tool, analytics_tool])
 class PRTChatAgent:
     def __init__(self):
         self.model = GenerativeModel(
-            "gemini-1.5-flash-001",
+            "gemini-2.5-flash-001",
             tools=[prt_tools]
         )
 
