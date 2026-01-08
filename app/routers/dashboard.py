@@ -51,10 +51,11 @@ async def get_full_dashboard(
     
     # 1. Income (รายรับ): ยังคงใช้ TransactionV1 หรือถ้ามี RV (Receipt Voucher) ควรใช้ DocumentType.RV
     # เบื้องต้นคงไว้แบบเดิมก่อน หรือถ้าจะให้แม่นยำควรเช็คระบบรายรับอีกที
-    income_sum = db.query(func.sum(TransactionV1.amount)).filter(
-        TransactionV1.type == "income",
-        extract('year', TransactionV1.occurred_at) == year
-    ).scalar() or 0
+    income_sum = db.execute(
+        select(func.sum(Document.amount))
+        .filter(Document.doc_type == DocumentType.RV) # <--- ใช้ RV
+        .filter(extract('year', Document.created_at) == year)
+    ).scalar() or 0.0
     
     # 2. Expenses (รายจ่าย): ✅ แก้มาใช้ Document PV (เหมือน Chatbot)
     expense_sum = db.query(func.sum(Document.amount)).filter(
