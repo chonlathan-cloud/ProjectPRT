@@ -10,8 +10,10 @@ from app.schemas.common import ResponseEnvelope, make_success_response
 # คุณอาจต้องสร้าง Schema นี้เพิ่มใน app/schemas/insights.py หรือใส่ไว้ในไฟล์นี้ชั่วคราวก็ได้
 from pydantic import BaseModel
 
-router = APIRouter()
-
+router = APIRouter(
+    prefix="/api/v1/insights",
+    tags=["Insights"]
+)
 # --- Response Schemas ---
 class SummaryStats(BaseModel):
     normal_count: int = 0
@@ -51,8 +53,6 @@ def get_insights_data(
 
     # 2. Filter by Date (Month/Year)
     if year:
-        # ถ้าส่งปีมา กรองตามปี (ใช้ created_at หรือ date field ของคุณ)
-        # สมมติใช้ created_at
         query = query.filter(extract('year', Case.created_at) == year)
     
     if month:
@@ -60,24 +60,22 @@ def get_insights_data(
 
     # 3. Filter by User (Username)
     if username:
-        # Join กับ User table เพื่อหาจาก username
-        query = query.join(User, Case.requester_id == User.id).filter(User.name == username) # หรือ User.username แล้วแต่ Model จริง
+        query = query.join(User, Case.requester_id == User.id).filter(User.name == username)
 
-    # ดึงข้อมูลทั้งหมดที่ผ่าน Filter มาก่อน
     all_cases = query.all()
 
     # --- Calculation Logic ---
     summary = SummaryStats()
     transactions = []
 
-    # Status Groups definition
     PENDING_STATUSES = [CaseStatus.SUBMITTED]
     APPROVED_STATUSES = [CaseStatus.APPROVED, CaseStatus.PAID, CaseStatus.CLOSED]
 
     for case in all_cases:
-        amount = case.requested_amount or 0.0
+        # ✅ FIX: Convert Decimal to float before calculation
+        amount = float(case.requested_amount or 0.0)
         
-        # 1. Normal (Total) - นับทุกใบที่ Query เจอ
+        # 1. Normal (Total)
         summary.normal_count += 1
         summary.normal_amount += amount
 
@@ -94,12 +92,12 @@ def get_insights_data(
         # Prepare Transaction List
         transactions.append(TransactionItem(
             id=str(case.id),
-            doc_no=case.case_no or "-", # หรือ case.doc_no ถ้ามี
+            doc_no=case.case_no or "-",
             date=case.created_at.strftime("%d/%m/%Y"),
-            creator_id=str(case.requester_id), # เดี๋ยว Frontend เอาไป Map ชื่ออีกที
-            user_code=str(case.requester_id)[0:6], # Mock User Code from ID prefix
+            creator_id=str(case.requester_id),
+            user_code=str(case.requester_id)[0:6],
             purpose=case.purpose or "",
-            amount=amount,
+            amount=amount, # ✅ ใช้ค่าที่แปลงแล้ว
             status=case.status.value
         ))
 
