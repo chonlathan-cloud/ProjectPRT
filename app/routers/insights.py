@@ -39,7 +39,7 @@ class InsightsResponse(BaseModel):
 class InsightsResponseEnvelope(ResponseEnvelope):
     data: InsightsResponse
 
-@router.get("/", response_model=InsightsResponseEnvelope)
+@router.get("/", response_model=ResponseEnvelope[InsightsResponse])
 def get_insights_data(
     username: Optional[str] = Query(None, alias="user_id"),
     month: Optional[int] = Query(None, ge=1, le=12),
