@@ -1,7 +1,9 @@
 import uuid
 import datetime
 import enum
-from sqlalchemy import Column, String, Boolean, DateTime, Date, ForeignKey, Numeric, UniqueConstraint, Text, Enumn
+# ✅ แก้ไขบรรทัดนี้ (ลบ Enumn ออก)
+from sqlalchemy import Column, String, Boolean, DateTime, Date, ForeignKey, Numeric, UniqueConstraint, Text
+# เราใช้ ENUM จาก dialect postgresql แทน
 from sqlalchemy.dialects.postgresql import UUID, ENUM, JSONB
 from sqlalchemy.orm import declarative_base, relationship
 from sqlalchemy.sql import func
