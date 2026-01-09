@@ -1,8 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.orm import Session
 from sqlalchemy import func, extract, or_
 from typing import Optional, List
 from datetime import datetime
+from sqlalchemy.orm import Session, selectinload
+
 
 from app.db import get_db
 from app.models import Case, User, CaseStatus
@@ -41,7 +42,7 @@ class InsightsResponse(BaseModel):
 class InsightsResponseEnvelope(ResponseEnvelope):
     data: InsightsResponse
 
-@router.get("/", response_model=ResponseEnvelope[InsightsResponse])
+@router.get("/", response_model=InsightsResponseEnvelope)
 def get_insights_data(
     username: Optional[str] = Query(None, alias="user_id"),
     month: Optional[int] = Query(None, ge=1, le=12),
@@ -49,7 +50,7 @@ def get_insights_data(
     db: Session = Depends(get_db)
 ):
     # 1. Base Query
-    query = db.query(Case)
+    query = db.query(Case).options(selectinload(Case.documents))
 
     # 2. Filter by Date (Month/Year)
     if year:
@@ -72,7 +73,6 @@ def get_insights_data(
     APPROVED_STATUSES = [CaseStatus.APPROVED, CaseStatus.PAID, CaseStatus.CLOSED]
 
     for case in all_cases:
-        # ✅ FIX: Convert Decimal to float before calculation
         amount = float(case.requested_amount or 0.0)
         
         # 1. Normal (Total)
@@ -88,11 +88,12 @@ def get_insights_data(
         if case.status in APPROVED_STATUSES:
             summary.approved_count += 1
             summary.approved_amount += amount
-
+        doc_number = [doc.doc_no for doc in case.documents if doc.doc_no]
+        doc_no = ",".join(doc_number) if doc_number else "-"
         # Prepare Transaction List
         transactions.append(TransactionItem(
             id=str(case.id),
-            doc_no=case.case_no or "-",
+            doc_no=doc_no,
             date=case.created_at.strftime("%d/%m/%Y"),
             creator_id=str(case.requester_id),
             user_code=str(case.requester_id)[0:6],
