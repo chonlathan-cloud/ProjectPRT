@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session, selectinload
 
 
 from app.db import get_db
-from app.models import Case, User, CaseStatus
+from app.models import Case, User, CaseStatus, Document
 from app.schemas.common import ResponseEnvelope, make_success_response
 # คุณอาจต้องสร้าง Schema นี้เพิ่มใน app/schemas/insights.py หรือใส่ไว้ในไฟล์นี้ชั่วคราวก็ได้
 from pydantic import BaseModel
@@ -50,7 +50,7 @@ def get_insights_data(
     db: Session = Depends(get_db)
 ):
     # 1. Base Query
-    query = db.query(Case).options(selectinload(Case.documents))
+    query = db.qurey(Case,Document.doc_no).opterjoin(Document, Case.id == Document.case_id)
 
     # 2. Filter by Date (Month/Year)
     if year:
@@ -63,16 +63,15 @@ def get_insights_data(
     if username:
         query = query.join(User, Case.requester_id == User.id).filter(User.name == username)
 
-    all_cases = query.all()
+    VALID_STATUSES = [CaseStatus.SUBMITTED, CaseStatus.APPROVED, CaseStatus.PAID, CaseStatus.CLOSED]
+    query = query.filter(Case.status.in_(VALID_STATUSES))
+    result = query.all()
 
     # --- Calculation Logic ---
     summary = SummaryStats()
     transactions = []
 
-    PENDING_STATUSES = [CaseStatus.SUBMITTED]
-    APPROVED_STATUSES = [CaseStatus.APPROVED, CaseStatus.PAID, CaseStatus.CLOSED]
-
-    for case in all_cases:
+    for case, doc_no in result:
         amount = float(case.requested_amount or 0.0)
         
         # 1. Normal (Total)
@@ -80,20 +79,16 @@ def get_insights_data(
         summary.normal_amount += amount
 
         # 2. Pending (Submitted)
-        if case.status in PENDING_STATUSES:
-            summary.pending_count += 1
-            summary.pending_amount += amount
+
+        summary.pending_count += 1
+        summary.pending_amount += amount
 
         # 3. Approved (Approved + Paid + Closed)
-        if case.status in APPROVED_STATUSES:
-            summary.approved_count += 1
-            summary.approved_amount += amount
-        doc_number = [doc.doc_no for doc in case.documents if doc.doc_no]
-        doc_no = ",".join(doc_number) if doc_number else "-"
+        real_doc_no = doc_no if doc_no else "-"
         # Prepare Transaction List
         transactions.append(TransactionItem(
             id=str(case.id),
-            doc_no=doc_no,
+            doc_no=real_doc_no,
             date=case.created_at.strftime("%d/%m/%Y"),
             creator_id=str(case.requester_id),
             user_code=str(case.requester_id)[0:6],
