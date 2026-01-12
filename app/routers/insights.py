@@ -50,7 +50,7 @@ def get_insights_data(
     db: Session = Depends(get_db)
 ):
     # 1. Base Query
-    query = db.qurey(Case,Document.doc_no).opterjoin(Document, Case.id == Document.case_id)
+    query = db.query(Case,Document.doc_no).outerjoin(Document, Case.id == Document.case_id)
 
     # 2. Filter by Date (Month/Year)
     if year:
