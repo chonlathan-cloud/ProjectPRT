@@ -1,5 +1,5 @@
 # app/routers/dashboard.py
-from fastapi import APIRouter, Request, Depends, Query, HTTPException, status,
+from fastapi import APIRouter, Request, Depends, Query, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import func, desc, extract
 from datetime import datetime, date
@@ -7,6 +7,7 @@ from datetime import datetime, date
 from app.db import get_db
 from app.rbac import require_roles, ROLE_ADMIN, ROLE_ACCOUNTANT, ROLE_VIEWER
 from app.models import Document, DocumentType, Case, Category, CaseStatus, JVLineItem
+from app.services.doc_numbers import generate_document_no
 from app.schemas.common import make_success_response
 from app.schemas.document import JVCreate, DocumentResponse
 from app.schemas.dashboard import (
@@ -152,7 +153,7 @@ async def create_jv(
     
     # 3. สร้างเอกสาร JV (ใช้เลข Running ใหม่)
     # (สมมติฟังก์ชัน _generate_document_no มีอยู่แล้วในไฟล์นี้ หรือ import มา)
-    jv_no = f"JV-{datetime.now().strftime('%y%m')}-XXXX" # ใช้ logic จริงของคุณ
+    jv_no = generate_document_no(db, DocumentType.JV)
     
     jv_doc = Document(
         case_id=main_case.id, # JV ผูกกับ Case หลัก

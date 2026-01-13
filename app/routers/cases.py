@@ -5,13 +5,21 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import select, and_
+from sqlalchemy import select
+
+from app.services.doc_numbers import generate_document_no
 
 from app.db import get_db
 from app.deps import Role, has_role, get_current_user, UserInDB
 from app.models import (
-    Category, Case, CaseStatus, Document, DocCounter, 
-    DocumentType, CategoryType, User)
+    Category,
+    Case,
+    CaseStatus,
+    Document,
+    DocumentType,
+    CategoryType,
+    User,
+)
 from app.schemas.workflow import WorkflowResponse
 from app.schemas.case import CaseCreate, CaseResponse
 from app.services.audit import log_audit_event
@@ -43,21 +51,6 @@ def generate_case_no() -> str:
     unique_suffix = uuid.uuid4().hex[:6].upper()
     return f"CAS-{today_str}-{unique_suffix}"
 
-def _generate_document_no(db: Session, doc_prefix_enum: DocumentType) -> str:
-    current_ym = datetime.now(timezone.utc).strftime("%y%m")
-    doc_counter = db.execute(
-        select(DocCounter).filter_by(doc_prefix=doc_prefix_enum, year_month=current_ym).with_for_update()
-    ).scalar_one_or_none()
-
-    if not doc_counter:
-        doc_counter = DocCounter(doc_prefix=doc_prefix_enum, year_month=current_ym, last_number=0)
-        db.add(doc_counter)
-        db.flush()
-    
-    doc_counter.last_number += 1
-    new_number = int(doc_counter.last_number)
-    return f"{doc_prefix_enum.value}-{current_ym}-{new_number:04d}"
-
 def _ensure_case_visibility(db_case: Case, current_user: UserInDB) -> None:
     can_see_all = any(role in current_user.roles for role in [
         Role.FINANCE, Role.ACCOUNTING, Role.ADMIN, Role.EXECUTIVE, Role.TREASURY
@@ -74,8 +67,10 @@ async def create_case(
     db: Session = Depends(get_db)
 ):
     category = db.execute(select(Category).filter_by(id=payload.category_id)).scalar_one_or_none()
-    if not category: raise HTTPException(404, "Category not found.")
-    if not category.is_active: raise HTTPException(400, "Category is inactive.")
+    if not category:
+        raise HTTPException(404, "Category not found.")
+    if not category.is_active:
+        raise HTTPException(400, "Category is inactive.")
 
     if category.type in [CategoryType.REVENUE, CategoryType.ASSET]:
         if not payload.deposit_account_id:
@@ -94,7 +89,7 @@ async def create_case(
         purpose=payload.purpose,
         status=CaseStatus.DRAFT,
         deposit_account_id=payload.deposit_account_id,
-        is_receipt_uploaded=False, 
+        is_receipt_uploaded=False,
         created_by=current_user.username
     )
     db.add(db_case)
@@ -109,17 +104,18 @@ async def submit_case(
     current_user: Annotated[UserInDB, Depends(has_role([Role.REQUESTER]))],
     db: Session = Depends(get_db)
 ):
-    # ✅ แก้ไข 1: ลบ with db.begin() ออก เพื่อแก้ Error 500 (Transaction ซ้อน)
     db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
-    if not db_case: raise HTTPException(404, "Case not found.")
-    
-    if db_case.requester_id != current_user.username: raise HTTPException(403, "Not authorized.")
-    if db_case.status != CaseStatus.DRAFT: raise HTTPException(409, "Only DRAFT cases can be submitted.")
+    if not db_case:
+        raise HTTPException(404, "Case not found.")
+
+    if db_case.requester_id != current_user.username:
+        raise HTTPException(403, "Not authorized.")
+    if db_case.status != CaseStatus.DRAFT:
+        raise HTTPException(409, "Only DRAFT cases can be submitted.")
 
     # --- Gen Document No ---
     category = db.execute(select(Category).filter_by(id=db_case.category_id)).scalar_one()
-    
-    # ✅ แก้ไข 2: เพิ่ม Logic สำหรับ JV (ถ้าไม่ใช่ Expense/Revenue ให้เป็น JV)
+
     if category.type == CategoryType.EXPENSE:
         doc_type = DocumentType.PV
     elif category.type == CategoryType.REVENUE:
@@ -127,21 +123,20 @@ async def submit_case(
     else:
         doc_type = DocumentType.JV  # ครอบคลุม ASSET และอื่นๆ
 
-    # ตรวจสอบว่ามีเอกสารเดิมไหม
     existing_doc = db.execute(select(Document).filter_by(case_id=case_id)).scalar_one_or_none()
-    
+
     if not existing_doc:
-        doc_no = _generate_document_no(db, doc_type)
+        doc_no = generate_document_no(db, doc_type)
         new_doc = Document(
             case_id=case_id,
             doc_type=doc_type,
             doc_no=doc_no,
             amount=db_case.requested_amount,
-            pdf_uri="pending-approval", 
+            pdf_uri="pending-approval",
             created_by=current_user.username
         )
         db.add(new_doc)
-        db.flush() # สำคัญ: flush เพื่อให้ new_doc เข้า session
+        db.flush()
     else:
         doc_no = existing_doc.doc_no
 
@@ -149,19 +144,18 @@ async def submit_case(
     db_case.status = CaseStatus.SUBMITTED
     db_case.updated_by = current_user.username
     db_case.updated_at = datetime.now(timezone.utc)
-    
+
     log_audit_event(
-        db, "case", db_case.id, "submit_and_gen_no", current_user.username, 
+        db, "case", db_case.id, "submit_and_gen_no", current_user.username,
         {"old": old_status.value, "new": db_case.status.value, "doc_no": doc_no}
     )
 
-    # ✅ แก้ไข 3: Commit ปิดท้าย
-    db.commit() 
+    db.commit()
     db.refresh(db_case)
 
     return WorkflowResponse(
-        message=f"Submitted. Generated {doc_no}", 
-        case_id=str(db_case.id), 
+        message=f"Submitted. Generated {doc_no}",
+        case_id=str(db_case.id),
         status=db_case.status.value,
         doc_no=doc_no
     )
@@ -173,13 +167,13 @@ async def approve_case(
     db: Session = Depends(get_db)
 ):
     db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
-    if not db_case: raise HTTPException(404, "Case not found")
-    
+    if not db_case:
+        raise HTTPException(404, "Case not found")
+
     if db_case.status != CaseStatus.SUBMITTED:
-        raise HTTPException(409, f"Case must be SUBMITTED to approve.")
+        raise HTTPException(409, "Case must be SUBMITTED to approve.")
 
     category = db.execute(select(Category).filter_by(id=db_case.category_id)).scalar_one()
-    # ถ้าเป็น Expense -> Approved (รอจ่ายเงิน), ถ้าเป็น Revenue/Asset -> Closed (จบงานเลย)
     new_status = CaseStatus.APPROVED if category.type == CategoryType.EXPENSE else CaseStatus.CLOSED
 
     doc = db.execute(select(Document).filter_by(case_id=case_id)).scalar_one_or_none()
@@ -192,7 +186,7 @@ async def approve_case(
 
     db.commit()
     log_audit_event(
-        db, "case", case_id, "approve", current_user.username, 
+        db, "case", case_id, "approve", current_user.username,
         {"old_status": old_status.value, "new_status": new_status.value, "doc_no": doc_no}
     )
 
@@ -210,8 +204,10 @@ async def mark_paid(
     db: Session = Depends(get_db)
 ):
     db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
-    if not db_case: raise HTTPException(404, "Case not found")
-    if db_case.status != CaseStatus.APPROVED: raise HTTPException(409, "Case must be APPROVED to pay.")
+    if not db_case:
+        raise HTTPException(404, "Case not found")
+    if db_case.status != CaseStatus.APPROVED:
+        raise HTTPException(409, "Case must be APPROVED to pay.")
 
     db_case.status = CaseStatus.PAID
     db_case.updated_by = current_user.username
@@ -241,17 +237,19 @@ async def read_cases(
         .outerjoin(User, Case.requester_id == User.email)
     )
 
-    can_see_all = any(role in current_user.roles for role in [Role.FINANCE, Role.ACCOUNTING, Role.ADMIN, Role.EXECUTIVE, Role.TREASURY])
-    if not can_see_all: 
+    can_see_all = any(role in current_user.roles for role in [
+        Role.FINANCE, Role.ACCOUNTING, Role.ADMIN, Role.EXECUTIVE, Role.TREASURY
+    ])
+    if not can_see_all:
         query = query.where(Case.requester_id == current_user.username)
-    
-    if status: 
+
+    if status:
         query = query.where(Case.status == status)
-    
+
     query = query.order_by(Case.created_at.desc())
-    
+
     results = db.execute(query).all()
-    
+
     mapped_results = []
     for row in results:
         mapped_results.append(CaseAdminView(
@@ -265,21 +263,10 @@ async def read_cases(
             status=row.status.value,
             department=row.department
         ))
-        
+
     return mapped_results
 
-@router.get("/{case_id}", response_model=CaseResponse)
-async def read_case(
-    case_id: UUID,
-    current_user: Annotated[UserInDB, Depends(get_current_user)],
-    db: Session = Depends(get_db)
-):
-    db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
-    if not db_case: raise HTTPException(404, "Not Found")
-    _ensure_case_visibility(db_case, current_user)
-    return CaseResponse.model_validate(db_case)
-
-@router.get("/search", response_model=List[CaseAdminView])
+@router.get("/search-by-doc", response_model=List[CaseAdminView])
 async def search_cases(
     doc_no: str = Query(..., min_length=3),
     db: Session = Depends(get_db)
@@ -290,17 +277,15 @@ async def search_cases(
     results = db.query(Case).join(Document).filter(
         Document.doc_no.ilike(f"%{doc_no}%")
     ).all()
-    
-    # แปลงเป็น Schema สำหรับแสดงผล (ใช้ CaseAdminView ที่มีอยู่แล้วได้เลย)
+
     mapped_results = []
     for row in results:
-        # หา Document ของ Case นี้เพื่อเอาเลขที่
         doc = db.query(Document).filter(Document.case_id == row.id).first()
         mapped_results.append(CaseAdminView(
             id=row.id,
             case_no=row.case_no,
             doc_no=doc.doc_no if doc else "-",
-            requester_name=row.requester_id, # หรือ join User เอาชื่อจริงถ้าต้องการ
+            requester_name=row.requester_id,
             description=row.purpose,
             requested_amount=float(row.requested_amount),
             created_at=row.created_at,
@@ -308,3 +293,15 @@ async def search_cases(
             department=row.department_id
         ))
     return mapped_results
+
+@router.get("/{case_id}", response_model=CaseResponse)
+async def read_case(
+    case_id: UUID,
+    current_user: Annotated[UserInDB, Depends(get_current_user)],
+    db: Session = Depends(get_db)
+):
+    db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
+    if not db_case:
+        raise HTTPException(404, "Not Found")
+    _ensure_case_visibility(db_case, current_user)
+    return CaseResponse.model_validate(db_case)

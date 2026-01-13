@@ -49,51 +49,68 @@ def get_insights_data(
     year: Optional[int] = Query(None),
     db: Session = Depends(get_db)
 ):
-    # 1. Base Query
-    query = db.query(Case,Document.doc_no).outerjoin(Document, Case.id == Document.case_id)
+    # 1. Base Query (โหลด documents มาด้วย เพื่อรวม doc_no ทั้งหมด)
+    query = db.query(Case).options(selectinload(Case.documents))
 
     # 2. Filter by Date (Month/Year)
     if year:
-        query = query.filter(extract('year', Case.created_at) == year)
-    
+        query = query.filter(extract("year", Case.created_at) == year)
     if month:
-        query = query.filter(extract('month', Case.created_at) == month)
+        query = query.filter(extract("month", Case.created_at) == month)
 
     # 3. Filter by User (Username)
     if username:
         query = query.join(User, Case.requester_id == User.id).filter(User.name == username)
 
-    VALID_STATUSES = [CaseStatus.SUBMITTED, CaseStatus.APPROVED, CaseStatus.PAID, CaseStatus.CLOSED]
-    query = query.filter(Case.status.in_(VALID_STATUSES))
-    result = query.all()
+    # 4. Status definitions
+    NORMAL_STATUSES = [
+        CaseStatus.DRAFT,
+        CaseStatus.SUBMITTED,
+        CaseStatus.APPROVED,
+        CaseStatus.PAID,
+        CaseStatus.CLOSED,
+    ]
+    PENDING_STATUSES = [CaseStatus.SUBMITTED]
+    APPROVED_STATUSES = [CaseStatus.APPROVED, CaseStatus.PAID, CaseStatus.CLOSED]
+
+    # 5. Apply normal-status filter
+    query = query.filter(Case.status.in_(NORMAL_STATUSES))
+
+    results = query.all()
 
     # --- Calculation Logic ---
     summary = SummaryStats()
     transactions = []
 
-    for case, doc_no in result:
+    for case in results:
         amount = float(case.requested_amount or 0.0)
-        
-        # 1. Normal (Total)
+
+        # 1) Normal (Total)
         summary.normal_count += 1
         summary.normal_amount += amount
 
-        # 2. Pending (Submitted)
+        # 2) Pending (Submitted)
+        if case.status in PENDING_STATUSES:
+            summary.pending_count += 1
+            summary.pending_amount += amount
 
-        summary.pending_count += 1
-        summary.pending_amount += amount
+        # 3) Approved (Approved + Paid + Closed)
+        if case.status in APPROVED_STATUSES:
+            summary.approved_count += 1
+            summary.approved_amount += amount
 
-        # 3. Approved (Approved + Paid + Closed)
-        real_doc_no = doc_no if doc_no else "-"
-        # Prepare Transaction List
+        # รวมเลขเอกสารทั้งหมด
+        doc_numbers = [doc.doc_no for doc in case.documents if doc.doc_no]
+        doc_no = ", ".join(doc_numbers) if doc_numbers else "-"
+
         transactions.append(TransactionItem(
             id=str(case.id),
-            doc_no=real_doc_no,
+            doc_no=doc_no,
             date=case.created_at.strftime("%d/%m/%Y"),
             creator_id=str(case.requester_id),
             user_code=str(case.requester_id)[0:6],
             purpose=case.purpose or "",
-            amount=amount, # ✅ ใช้ค่าที่แปลงแล้ว
+            amount=amount,
             status=case.status.value
         ))
 
