@@ -1,164 +1,136 @@
+# app/services/chat_agent.py
 import vertexai
 from vertexai.generative_models import GenerativeModel, Tool, FunctionDeclaration, Part
 from sqlalchemy.orm import Session
-from datetime import datetime
-import logging
-from app.services.chat_tools import (
-    search_documents_tool, 
-    get_financial_analytics_tool, 
-    search_cases_with_details_tool # <--- ✅ Import Tool ใหม่ที่เพิ่งสร้าง
-)
 from app.core.settings import settings
+from app.services.chat_tools import (
+    search_document_by_no_tool,
+    get_financial_analytics_tool,
+    check_workflow_status_tool,
+    get_policy_info_tool,
+    get_monthly_comparison_tool
+)
+import logging
+from datetime import datetime
 
-# ตั้งค่า Logger
 logger = logging.getLogger(__name__)
 
-# --- 1. Init Vertex AI ---
-try:
-    vertexai.init(project=settings.GOOGLE_CLOUD_PROJECT, location="asia-southeast1")
-except Exception as e:
-    logger.error(f"Vertex AI Init Error: {e}")
+# --- Tool Definitions ---
 
-# --- 2. Tool Definitions ---
-
-# Tool 1: ค้นหาไฟล์ (เดิม)
+# 1. Search Specific Document
 search_doc_decl = FunctionDeclaration(
-    name="search_documents",
-    description="Search for file attachments/documents by filename keyword.",
+    name="search_document_by_no",
+    description="Find a specific document by its number (PV-xxxx, RV-xxxx) to get status, amount, and download link.",
     parameters={
         "type": "object",
         "properties": {
-            "keyword": {"type": "string", "description": "Search term e.g. 'invoice', 'slip', 'receipt'"}
+            "doc_no": {"type": "string", "description": "Document number e.g. PV-6702-001"}
         },
-        "required": ["keyword"]
+        "required": ["doc_no"]
     }
 )
 
-# Tool 2: ดูยอดรวม (เดิม)
+# 2. Financial Analytics
 analytics_decl = FunctionDeclaration(
-    name="get_financial_analytics", 
-    description="Get total financial summary (Income/Expense/Balance). Use this for aggregation questions like 'Total expense this month'.",
+    name="get_financial_analytics",
+    description="Calculate total income or expense for a specific period. EXCLUDES JV/Journal Vouchers.",
     parameters={
         "type": "object",
         "properties": {
-            "start_date": {"type": "string", "description": "Start date YYYY-MM-DD"},
-            "end_date": {"type": "string", "description": "End date YYYY-MM-DD"},
-            "category_name": {"type": "string", "description": "Category filter e.g. 'Sales', 'Travel'"},
-            "transaction_type": {
-                "type": "string", 
-                "enum": ["EXPENSE", "REVENUE", "ALL"],
-                "description": "Type of transaction."
-            }
+            "start_date": {"type": "string", "description": "YYYY-MM-DD"},
+            "end_date": {"type": "string", "description": "YYYY-MM-DD"},
+            "transaction_type": {"type": "string", "enum": ["EXPENSE", "REVENUE"], "description": "Default is EXPENSE"}
         },
-        "required": ["transaction_type"] 
+        "required": ["transaction_type"]
     }
 )
 
-# Tool 3: ค้นหารายการละเอียด (✅ เพิ่มใหม่)
-case_details_decl = FunctionDeclaration(
-    name="search_cases_with_details",
-    description="Search for specific expense/revenue lists/items. Use this when user asks for 'list of items', 'details of expenses', 'who requested what', or specific category breakdowns.",
+# 3. Workflow Status
+workflow_decl = FunctionDeclaration(
+    name="check_workflow_status",
+    description="Check who is currently holding the task or why it is delayed.",
     parameters={
         "type": "object",
         "properties": {
-            "category_keyword": {"type": "string", "description": "Keyword for category e.g. 'Food', 'Travel', 'Equipment'"},
-            "requester_name": {"type": "string", "description": "Name of the requester to filter"},
-            "status": {"type": "string", "description": "Filter by status e.g. 'APPROVED'"}
+            "doc_or_case_no": {"type": "string", "description": "Case or Doc number"}
         },
+        "required": ["doc_or_case_no"]
     }
 )
 
-# รวม Tools ทั้งหมด
-prt_tools = Tool(function_declarations=[search_doc_decl, analytics_decl, case_details_decl])
+# 4. Policy Info
+policy_decl = FunctionDeclaration(
+    name="get_policy_info",
+    description="Answer questions about rules, regulations, limits, or how-to (e.g., taxi limit, meal allowance).",
+    parameters={
+        "type": "object",
+        "properties": {
+            "query_topic": {"type": "string", "description": "Topic of the policy question"}
+        },
+        "required": ["query_topic"]
+    }
+)
 
-# --- 3. Chat Agent Class ---
+# 5. Monthly Insight
+insight_decl = FunctionDeclaration(
+    name="get_monthly_comparison",
+    description="Compare this month's expense with last month.",
+    parameters={"type": "object", "properties": {}}
+)
+
+prt_tools = Tool(function_declarations=[
+    search_doc_decl, analytics_decl, workflow_decl, policy_decl, insight_decl
+])
+
 class PRTChatAgent:
     def __init__(self):
-        # ใช้ Model Flash ที่เร็วและประหยัด
-        self.model = GenerativeModel(
-            "gemini-2.5-flash",
-            tools=[prt_tools]
-        )
+        vertexai.init(project=settings.GOOGLE_CLOUD_PROJECT, location="asia-southeast1")
+        self.model = GenerativeModel("gemini-2.5-flash", tools=[prt_tools])
 
-    def chat(self, user_message: str, db: Session, user_name: str = "User"):
-        # Context เวลาปัจจุบัน
-        now = datetime.now()
-        today_str = now.strftime("%Y-%m-%d")
+    def chat(self, user_message: str, db: Session, user_name: str):
+        # System Prompt ขั้นเทพ
+        system_instruction = f"""
+        You are PRT FinBot.
+        Context: User={user_name}, Date={datetime.now().strftime('%Y-%m-%d')}
         
-        # ✅ System Prompt ที่ปรับปรุงใหม่
-        system_prompt = f"""
-        You are 'PRT FinBot', an expert financial assistant.
-        
-        --- CONTEXT ---
-        * User: {user_name}
-        * Today: {today_str}
-        
-        --- TOOL USAGE GUIDELINES ---
-        1. **Summary Questions:** If asked for "Total", "Sum", "Overview", use `get_financial_analytics`.
-        2. **List/Detail Questions:** If asked for "List", "What are they?", "Show details", "Who spent what?", use `search_cases_with_details`.
-        3. **File Questions:** If asked for "File", "PDF", "Receipt", use `search_documents`.
-        
-        --- RESPONSE RULES ---
-        1. **Be Fact-Based:** Only answer based on the Tool Output. Do not hallucinate numbers.
-        2. **Show References:** When listing items, always show [Doc No] and [Amount] clearly.
-           Example: "- PV-6601-001: 500 บาท (ค่าอาหาร) โดย คุณสมชาย"
-        3. **Thai Language:** Always answer in polite Thai.
+        RULES:
+        1. **Strictly exclude JV (Journal Voucher)** from any "Spending", "Expense", or "Income" calculation unless explicitly asked.
+        2. If user asks for specific document details, use `search_document_by_no` and provide the **download link** if available.
+        3. If user asks about rules/limits (e.g. taxi, food), use `get_policy_info`.
+        4. Answer in **Thai**.
         """
 
-        # เริ่ม Chat
         chat = self.model.start_chat()
-        full_msg = f"{system_prompt}\n\nUser Question: {user_message}"
         
-        try:
-            response = chat.send_message(full_msg)
+        # ส่ง Prompt + Message
+        response = chat.send_message(f"{system_instruction}\n\nUser: {user_message}")
+
+        # Handle Function Calling
+        if response.candidates[0].content.parts[0].function_call:
+            func = response.candidates[0].content.parts[0].function_call
+            fname = func.name
+            args = func.args
             
-            # --- Function Calling Loop ---
-            if response.candidates[0].content.parts[0].function_call:
-                func_call = response.candidates[0].content.parts[0].function_call
-                func_name = func_call.name
-                func_args = func_call.args
-                
-                logger.info(f"🤖 AI Calling: {func_name} with {func_args}")
-                
-                api_result = None
-                try:
-                    # 1. Search Documents
-                    if func_name == "search_documents":
-                        api_result = search_documents_tool(db, keyword=func_args.get("keyword"))
-                    
-                    # 2. Analytics (ยอดรวม)
-                    elif func_name == "get_financial_analytics":
-                        api_result = get_financial_analytics_tool(
-                            db, 
-                            start_date=func_args.get("start_date"),
-                            end_date=func_args.get("end_date"),
-                            category_name=func_args.get("category_name"),
-                            transaction_type=func_args.get("transaction_type", "EXPENSE")
-                        )
-                    
-                    # 3. Case Details (✅ รายการละเอียด)
-                    elif func_name == "search_cases_with_details":
-                        api_result = search_cases_with_details_tool(
-                            db,
-                            category_keyword=func_args.get("category_keyword"),
-                            requester_name=func_args.get("requester_name"),
-                            status=func_args.get("status")
-                        )
+            logger.info(f"Tool Call: {fname} with {args}")
+            
+            result = None
+            try:
+                if fname == "search_document_by_no":
+                    result = search_document_by_no_tool(db, args["doc_no"])
+                elif fname == "get_financial_analytics":
+                    result = get_financial_analytics_tool(db, args.get("start_date"), args.get("end_date"), args.get("transaction_type"))
+                elif fname == "check_workflow_status":
+                    result = check_workflow_status_tool(db, args["doc_or_case_no"])
+                elif fname == "get_policy_info":
+                    result = get_policy_info_tool(args["query_topic"])
+                elif fname == "get_monthly_comparison":
+                    result = get_monthly_comparison_tool(db)
+            except Exception as e:
+                result = f"Error executing tool: {e}"
 
-                except Exception as tool_err:
-                    logger.error(f"Tool Error: {tool_err}")
-                    api_result = {"error": "เกิดข้อผิดพลาดในการดึงข้อมูลจากฐานข้อมูล"}
-
-                # ส่งผลลัพธ์กลับไปให้ AI สรุปเป็นภาษาคน
-                response = chat.send_message(
-                    Part.from_function_response(
-                        name=func_name,
-                        response={"result": api_result}
-                    )
-                )
-
-            return response.text
-
-        except Exception as e:
-            logger.error(f"Gemini Chat Error: {e}")
-            return "ขออภัยครับ ระบบ AI ขัดข้องชั่วคราว"
+            # ส่งผลกลับ AI
+            response = chat.send_message(
+                Part.from_function_response(name=fname, response={"result": result})
+            )
+            
+        return response.text
