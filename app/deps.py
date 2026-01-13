@@ -24,10 +24,12 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 # User Model for Dependency Injection
 class UserInDB:
-    def __init__(self, username: str, roles: List[Role], id: str = None):
+    def __init__(self, username: str, roles: List[Role], id: str = None, name: str = None, email: str = None):
         self.id = id
         self.username = username
         self.roles = roles
+        self.name = name
+        self.email = email
 
 # --- Real Implementation: Validate JWT & Fetch from DB ---
 async def get_current_user(
@@ -69,7 +71,13 @@ async def get_current_user(
     # ใช้ค่าแรกที่ไม่ใช่ว่าง: google_sub -> email -> user.id
     username_val = user.google_sub or user.email or str(user.id)
     
-    return UserInDB(username=username_val, roles=roles_enum, id=str(user.id))
+    return UserInDB(
+        username=username_val,
+        roles=roles_enum,
+        id=str(user.id),
+        name=user.name,
+        email=user.email
+    )
 
 
 def has_role(required_roles: List[Role]):

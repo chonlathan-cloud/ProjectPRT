@@ -28,7 +28,7 @@ async def chat_endpoint(
 ):
     try:
         # 3. เตรียมชื่อ User (ถ้าไม่มีชื่อ ให้ใช้อีเมลแทน)
-        user_name = current_user.name if current_user.name else current_user.email
+        user_name = current_user.name or current_user.email or current_user.username
 
         # 4. เรียกใช้ฟังก์ชัน chat() โดยส่ง db และ user_name เข้าไปตามโครงสร้างใหม่
         reply = chat_agent.chat(
