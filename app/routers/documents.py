@@ -1,20 +1,21 @@
 # app/routers/dashboard.py
-from fastapi import APIRouter, Request, Depends, Query
+from fastapi import APIRouter, Request, Depends, Query, HTTPException, status,
 from sqlalchemy.orm import Session
 from sqlalchemy import func, desc, extract
 from datetime import datetime, date
 
 from app.db import get_db
 from app.rbac import require_roles, ROLE_ADMIN, ROLE_ACCOUNTANT, ROLE_VIEWER
-from app.models import Document, DocumentType, Case, Category, CaseStatus
+from app.models import Document, DocumentType, Case, Category, CaseStatus, JVLineItem
 from app.schemas.common import make_success_response
+from app.schemas.document import JVCreate, DocumentResponse
 from app.schemas.dashboard import (
     DashboardResponse, MonthlyData, ActivityData, TransactionItem
 )
 
 router = APIRouter(
-    prefix="/api/v1/dashboard",
-    tags=["Dashboard"],
+    prefix="/api/v1/documents",
+    tags=["documents"],
 )
 
 @router.get("", response_model=DashboardResponse)
@@ -125,3 +126,58 @@ async def get_full_dashboard(
         "activityStats": activity_stats,
         "latestTransactions": latest_transactions
     })
+
+@router.post("/jv", response_model=DocumentResponse)
+async def create_jv(
+    payload: JVCreate,
+    db: Session = Depends(get_db)
+):
+    """
+    สร้าง JV โดยการรวม Case (PV/RV) หลายๆ ใบเข้าด้วยกัน
+    """
+    # 1. ตรวจสอบ Case หลัก
+    main_case = db.query(Case).filter(Case.id == payload.main_case_id).first()
+    if not main_case:
+        raise HTTPException(404, "Main case not found")
+
+    # 2. คำนวณยอดรวมจากทุก Case ที่เลือกรวมกัน
+    total_amount = main_case.requested_amount
+    all_case_ids = [payload.main_case_id] + payload.linked_case_ids
+    
+    # วนลูปเช็ค Case อื่นๆ และรวมยอด
+    for linked_id in payload.linked_case_ids:
+        c = db.query(Case).filter(Case.id == linked_id).first()
+        if c:
+            total_amount += c.requested_amount
+    
+    # 3. สร้างเอกสาร JV (ใช้เลข Running ใหม่)
+    # (สมมติฟังก์ชัน _generate_document_no มีอยู่แล้วในไฟล์นี้ หรือ import มา)
+    jv_no = f"JV-{datetime.now().strftime('%y%m')}-XXXX" # ใช้ logic จริงของคุณ
+    
+    jv_doc = Document(
+        case_id=main_case.id, # JV ผูกกับ Case หลัก
+        doc_type=DocumentType.JV,
+        doc_no=jv_no,
+        amount=total_amount,
+        pdf_uri="pending-jv",
+        created_by="system" 
+    )
+    db.add(jv_doc)
+    db.flush()
+
+    # 4. สร้าง JV Line Items (Link กลับไปหา Case เดิม)
+    for cid in all_case_ids:
+        c = db.query(Case).filter(Case.id == cid).first()
+        line = JVLineItem(
+            jv_document_id=jv_doc.id,
+            ref_case_id=cid,
+            amount=c.requested_amount
+        )
+        db.add(line)
+        
+        # Option: ปิด Case เดิมเพื่อไม่ให้เอาไปใช้ซ้ำ
+        c.status = CaseStatus.CLOSED
+        
+    db.commit()
+    db.refresh(jv_doc)
+    return jv_doc

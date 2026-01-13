@@ -3,7 +3,7 @@ from typing import Optional, List, Annotated
 from uuid import UUID
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import select, and_
 
@@ -278,3 +278,33 @@ async def read_case(
     if not db_case: raise HTTPException(404, "Not Found")
     _ensure_case_visibility(db_case, current_user)
     return CaseResponse.model_validate(db_case)
+
+@router.get("/search", response_model=List[CaseAdminView])
+async def search_cases(
+    doc_no: str = Query(..., min_length=3),
+    db: Session = Depends(get_db)
+):
+    """
+    ค้นหา Case จากเลขที่เอกสาร (PV-xxxx, RV-xxxx)
+    """
+    results = db.query(Case).join(Document).filter(
+        Document.doc_no.ilike(f"%{doc_no}%")
+    ).all()
+    
+    # แปลงเป็น Schema สำหรับแสดงผล (ใช้ CaseAdminView ที่มีอยู่แล้วได้เลย)
+    mapped_results = []
+    for row in results:
+        # หา Document ของ Case นี้เพื่อเอาเลขที่
+        doc = db.query(Document).filter(Document.case_id == row.id).first()
+        mapped_results.append(CaseAdminView(
+            id=row.id,
+            case_no=row.case_no,
+            doc_no=doc.doc_no if doc else "-",
+            requester_name=row.requester_id, # หรือ join User เอาชื่อจริงถ้าต้องการ
+            description=row.purpose,
+            requested_amount=float(row.requested_amount),
+            created_at=row.created_at,
+            status=row.status.value,
+            department=row.department_id
+        ))
+    return mapped_results
