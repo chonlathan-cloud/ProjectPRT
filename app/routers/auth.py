@@ -172,3 +172,4 @@ async def get_my_info(current_user: Annotated[UserInDB, Depends(get_current_user
         "username": current_user.username,
         "roles": current_user.roles  # ระบบจะดึงจาก DB ล่าสุดผ่าน get_current_user
     })
+

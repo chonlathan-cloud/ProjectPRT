@@ -63,7 +63,7 @@ def _ensure_case_visibility(db_case: Case, current_user: UserInDB) -> None:
 @router.post("/", response_model=CaseResponse, status_code=status.HTTP_201_CREATED)
 async def create_case(
     payload: CaseCreate,
-    current_user: Annotated[UserInDB, Depends(has_role([Role.REQUESTER]))],
+    current_user: Annotated[UserInDB, Depends(get_current_user)],
     db: Session = Depends(get_db)
 ):
     category = db.execute(select(Category).filter_by(id=payload.category_id)).scalar_one_or_none()
@@ -101,7 +101,7 @@ async def create_case(
 @router.post("/{case_id}/submit", response_model=WorkflowResponse)
 async def submit_case(
     case_id: UUID,
-    current_user: Annotated[UserInDB, Depends(has_role([Role.REQUESTER]))],
+    current_user: Annotated[UserInDB, Depends(get_current_user)],
     db: Session = Depends(get_db)
 ):
     db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()

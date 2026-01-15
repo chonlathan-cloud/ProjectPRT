@@ -3,10 +3,11 @@ from sqlalchemy import func, extract, or_
 from typing import Optional, List
 from datetime import datetime
 from sqlalchemy.orm import Session, selectinload
+from uuid import UUID
 
 
 from app.db import get_db
-from app.models import Case, User, CaseStatus, Document
+from app.models import Case, CaseStatus, Document, Category, CategoryType
 from app.schemas.common import ResponseEnvelope, make_success_response
 # คุณอาจต้องสร้าง Schema นี้เพิ่มใน app/schemas/insights.py หรือใส่ไว้ในไฟล์นี้ชั่วคราวก็ได้
 from pydantic import BaseModel
@@ -44,7 +45,9 @@ class InsightsResponseEnvelope(ResponseEnvelope):
 
 @router.get("/", response_model=InsightsResponseEnvelope)
 def get_insights_data(
-    username: Optional[str] = Query(None, alias="user_id"),
+    requester_id: Optional[str] = Query(None, alias="user_id"),
+    category_id: Optional[UUID] = Query(None),
+    category_type: Optional[CategoryType] = Query(None),
     month: Optional[int] = Query(None, ge=1, le=12),
     year: Optional[int] = Query(None),
     db: Session = Depends(get_db)
@@ -58,9 +61,17 @@ def get_insights_data(
     if month:
         query = query.filter(extract("month", Case.created_at) == month)
 
-    # 3. Filter by User (Username)
-    if username:
-        query = query.join(User, Case.requester_id == User.id).filter(User.name == username)
+    # 3. Filter by User (Requester ID)
+    if requester_id:
+        query = query.filter(Case.requester_id == requester_id)
+
+    # 4. Filter by Category
+    if category_id:
+        query = query.filter(Case.category_id == category_id)
+    
+    # Filter by Category Type
+    if category_type:
+        query = query.join(Category, Case.category_id == Category.id).filter(Category.type == category_type)
 
     # 4. Status definitions
     NORMAL_STATUSES = [
