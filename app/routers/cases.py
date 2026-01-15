@@ -3,7 +3,7 @@ from typing import Optional, List, Annotated
 from uuid import UUID
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 
@@ -19,10 +19,14 @@ from app.models import (
     DocumentType,
     CategoryType,
     User,
+    Attachment,
+    AttachmentType,
 )
 from app.schemas.workflow import WorkflowResponse
 from app.schemas.case import CaseCreate, CaseResponse
+from app.schemas.files import FileUploadResponse
 from app.services.audit import log_audit_event
+from app.services import gcs
 from pydantic import BaseModel
 
 router = APIRouter(
@@ -97,6 +101,49 @@ async def create_case(
     db.refresh(db_case)
     log_audit_event(db, "case", db_case.id, "create", current_user.username, payload.model_dump(mode="json"))
     return CaseResponse.model_validate(db_case)
+
+@router.post("/{case_id}/upload-receipt", response_model=FileUploadResponse)
+async def upload_receipt(
+    case_id: UUID,
+    current_user: Annotated[UserInDB, Depends(get_current_user)],
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
+):
+    db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
+    if not db_case:
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    doc = db.execute(select(Document).filter_by(case_id=case_id)).scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=400, detail="Document not generated yet.")
+
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    destination_blob_name = f"{doc.doc_no}/{timestamp}_{file.filename}"
+    file_content = await file.read()
+    gcs_uri = gcs.upload_bytes(
+        destination_blob_name,
+        file_content,
+        content_type=file.content_type or "application/octet-stream"
+    )
+
+    attachment = Attachment(
+        case_id=case_id,
+        type=AttachmentType.RECEIPT,
+        gcs_uri=destination_blob_name,
+        uploaded_by=current_user.username
+    )
+    db.add(attachment)
+    db_case.is_receipt_uploaded = True
+    db.commit()
+    db.refresh(attachment)
+
+    return FileUploadResponse(
+        id=attachment.id,
+        case_id=case_id,
+        file_name=file.filename,
+        url=gcs_uri,
+        type=attachment.type
+    )
 
 @router.post("/{case_id}/submit", response_model=WorkflowResponse)
 async def submit_case(

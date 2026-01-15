@@ -3,11 +3,14 @@ from google.cloud import storage
 from app.core.settings import settings
 
 def _get_storage_client():
-    # Authenticates using GOOGLE_APPLICATION_CREDENTIALS env var or metadata server
-    return storage.Client.from_service_account_json(
-            json_credentials_path=settings.GOOGLE_APPLICATION_CREDENTIALS,
+    # Prefer explicit service account JSON; fallback to default credentials (Cloud Run).
+    credentials_path = settings.GOOGLE_APPLICATION_CREDENTIALS
+    if credentials_path:
+        return storage.Client.from_service_account_json(
+            json_credentials_path=credentials_path,
             project=settings.GOOGLE_CLOUD_PROJECT
         )
+    return storage.Client(project=settings.GOOGLE_CLOUD_PROJECT)
 def generate_signed_upload_url(object_name: str, content_type: str) -> str:
     client = _get_storage_client()
     bucket = client.bucket(settings.GCS_BUCKET_NAME)
