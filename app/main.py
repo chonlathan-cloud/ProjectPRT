@@ -15,6 +15,7 @@ from app.routers.auth import router as auth_router
 from app.routers.admin import router as admin_router
 from app.routers.chat import router as chat_router
 from app.routers import insights  # ✅ ต้อง import module นี้
+from app.routers.profit_loss import router as profit_loss_router
 
 app = FastAPI(
     title="PRT Software Accounting API",
@@ -47,6 +48,7 @@ app.include_router(auth_router)
 app.include_router(admin_router)
 app.include_router(chat_router)
 app.include_router(insights.router) # ✅ เพิ่ม insights เข้าไป
+app.include_router(profit_loss_router)
 
 # --- Health Checks ---
 @app.get("/healthz", tags=["Health Check"])
