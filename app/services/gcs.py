@@ -1,6 +1,9 @@
 from datetime import timedelta
+import logging
 from google.cloud import storage
 from app.core.settings import settings
+
+logger = logging.getLogger(__name__)
 
 def _get_storage_client():
     # Prefer explicit service account JSON; fallback to default credentials (Cloud Run).
@@ -38,6 +41,21 @@ def generate_signed_download_url(object_name: str) -> str:
         expiration=timedelta(seconds=settings.SIGNED_URL_EXPIRATION_SECONDS)
     )
     return url
+
+
+def generate_download_url(object_name: str) -> str:
+    client = _get_storage_client()
+    bucket = client.bucket(settings.GCS_BUCKET_NAME)
+    blob = bucket.blob(object_name)
+    try:
+        return blob.generate_signed_url(
+            version="v4",
+            method="GET",
+            expiration=timedelta(seconds=settings.SIGNED_URL_EXPIRATION_SECONDS)
+        )
+    except AttributeError:
+        logger.warning("Signed URL unavailable; falling back to public URL.")
+        return blob.public_url
 
 def upload_bytes(object_name: str, data: bytes, content_type: str = "application/pdf") -> str:
     client = _get_storage_client()

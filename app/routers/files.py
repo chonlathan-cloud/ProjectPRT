@@ -91,7 +91,7 @@ async def list_files(
             id=a.id,
             case_id=a.case_id,
             file_name=a.gcs_uri.split('/')[-1],
-            url=gcs.generate_signed_url(a.gcs_uri),
+            url=gcs.generate_download_url(a.gcs_uri),
             type=a.type
         ) for a in attachments
     ]

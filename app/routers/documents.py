@@ -125,7 +125,7 @@ async def get_full_dashboard(
     for doc, case, cat in latest_docs:
         initial_char = "P" if doc.doc_type == DocumentType.PV else "R"
         gcs_uri = receipt_map.get(case.id)
-        receipt_url = gcs.generate_signed_download_url(gcs_uri) if gcs_uri else None
+        receipt_url = gcs.generate_download_url(gcs_uri) if gcs_uri else None
         latest_transactions.append(TransactionItem(
             id=str(doc.id),
             initial=initial_char, 
