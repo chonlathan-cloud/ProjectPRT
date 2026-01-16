@@ -6,8 +6,9 @@ from datetime import datetime, date
 
 from app.db import get_db
 from app.rbac import require_roles, ROLE_ADMIN, ROLE_ACCOUNTANT, ROLE_VIEWER
-from app.models import Document, DocumentType, Case, Category, CaseStatus, JVLineItem
+from app.models import Document, DocumentType, Case, Category, CaseStatus, JVLineItem, Attachment, AttachmentType
 from app.services.doc_numbers import generate_document_no
+from app.services import gcs
 from app.schemas.common import make_success_response
 from app.schemas.document import JVCreate, DocumentResponse
 from app.schemas.dashboard import (
@@ -106,15 +107,32 @@ async def get_full_dashboard(
         .limit(5).all()
 
     # ... (ส่วน Loop latest_transactions เหมือนเดิม) ...
+    case_ids = [case.id for _, case, _ in latest_docs]
+    receipt_map = {}
+    if case_ids:
+        receipt_rows = db.query(Attachment.case_id, Attachment.gcs_uri, Attachment.uploaded_at)\
+            .filter(
+                Attachment.type == AttachmentType.RECEIPT,
+                Attachment.case_id.in_(case_ids)
+            )\
+            .order_by(Attachment.case_id, desc(Attachment.uploaded_at))\
+            .all()
+        for case_id, gcs_uri, _uploaded_at in receipt_rows:
+            if case_id not in receipt_map:
+                receipt_map[case_id] = gcs_uri
+
     latest_transactions = []
     for doc, case, cat in latest_docs:
         initial_char = "P" if doc.doc_type == DocumentType.PV else "R"
+        gcs_uri = receipt_map.get(case.id)
+        receipt_url = gcs.generate_signed_download_url(gcs_uri) if gcs_uri else None
         latest_transactions.append(TransactionItem(
             id=str(doc.id),
             initial=initial_char, 
             name=cat.name_th,
             description=f"{doc.doc_no} - {case.purpose}",
-            amount=float(doc.amount)
+            amount=float(doc.amount),
+            receipt_url=receipt_url
         ))
 
     return make_success_response({

@@ -45,6 +45,7 @@ class CaseAdminView(BaseModel):
     created_at: datetime
     status: str
     department: Optional[str] = None
+    is_receipt_uploaded: bool
 
     class Config:
         from_attributes = True
@@ -276,6 +277,7 @@ async def read_cases(
             Case.requested_amount,
             Case.created_at,
             Case.status,
+            Case.is_receipt_uploaded,
             Case.department_id.label("department"),
             Document.doc_no,
             User.name.label("requester_name")
@@ -308,7 +310,8 @@ async def read_cases(
             requested_amount=float(row.requested_amount),
             created_at=row.created_at,
             status=row.status.value,
-            department=row.department
+            department=row.department,
+            is_receipt_uploaded=bool(row.is_receipt_uploaded)
         ))
 
     return mapped_results
@@ -337,7 +340,8 @@ async def search_cases(
             requested_amount=float(row.requested_amount),
             created_at=row.created_at,
             status=row.status.value,
-            department=row.department_id
+            department=row.department_id,
+            is_receipt_uploaded=bool(row.is_receipt_uploaded)
         ))
     return mapped_results
 

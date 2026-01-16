@@ -23,6 +23,7 @@ class TransactionItem(BaseModel):
     name: str
     description: str
     amount: float
+    receipt_url: Optional[str] = None
 
 class DashboardData(BaseModel):
     summary: SummaryData
