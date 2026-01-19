@@ -37,7 +37,7 @@ async def get_full_dashboard(
     # ในที่นี้สมมติว่านับเฉพาะที่ APPROVED หรือ PAID แล้ว หรืออย่างน้อยต้องไม่ Cancelled
     base_filter = [
         extract('year', Document.created_at) == year,
-        Case.status.notin_([CaseStatus.DRAFT, CaseStatus.CANCELLED, CaseStatus.REJECTED]) # <--- สำคัญ!
+        Case.status.notin_([CaseStatus.CLOSED, CaseStatus.APPROVED]) # <--- สำคัญ!
     ]
     # ---------------------------------------------------------
 

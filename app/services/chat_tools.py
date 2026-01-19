@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func, and_, or_, text, desc
 from app.models import Document, DocumentType, Case, Category, Attachment, CaseStatus, AuditLog, User
-from app.services.gcs import generate_signed_download_url
+from app.services.gcs import generate_download_url
 import json
 
 MOCK_POLICY_DATA = """
@@ -28,15 +28,20 @@ def search_document_by_no_tool(db: Session, doc_no: str):
         if not doc:
             return f"พบ Case {case.case_no} แต่ยังไม่มีเลขที่เอกสาร (สถานะ: {case.status.value})"
 
-    # 2. สร้าง Signed URL ถ้ามีไฟล์
+    # 2. ถ้าถูก REJECTED ไม่ให้ใช้งานต่อ
+    case_obj = db.query(Case).filter(Case.id == doc.case_id).first() if doc else None
+    if case_obj and case_obj.status == CaseStatus.REJECTED:
+        reason = case_obj.reject_reason or "ไม่ระบุเหตุผล"
+        return f"รายการ {doc.doc_no} ถูกปฏิเสธแล้ว (เหตุผล: {reason})"
+
+    # 3. สร้าง Signed URL ถ้ามีไฟล์
     file_link = "ไม่มีไฟล์แนบ"
     if doc.pdf_uri:
         try:
             # สมมติว่า pdf_uri เก็บ path เช่น "documents/pv-xxxx.pdf" หรือ "gs://bucket/..."
             object_name = doc.pdf_uri.replace(f"gs://project-prt-bucket/", "") # ปรับตาม GCS logic คุณ
             # เรียกใช้ฟังก์ชันจาก gcs.py
-            signed_url = generate_signed_download_url(object_name)
-            file_link = signed_url
+            file_link = generate_download_url(object_name)
         except Exception as e:
             file_link = f"(Error generating link: {str(e)})"
 
@@ -161,6 +166,10 @@ def check_workflow_status_tool(db: Session, doc_or_case_no: str):
     updated_by = last_log.performed_by if last_log else case.updated_by
     last_update = last_log.performed_at.strftime("%d/%m/%Y %H:%M") if last_log else "-"
 
+    if case.status == CaseStatus.REJECTED:
+        reason = case.reject_reason or "ไม่ระบุเหตุผล"
+        return f"รายการ {case.case_no} ถูกปฏิเสธแล้ว (เหตุผล: {reason})"
+
     return f"""
     รายการ: {case.case_no}
     สถานะปัจจุบัน: {case.status.value}
@@ -187,7 +196,9 @@ def get_monthly_comparison_tool(db: Session):
 
     def get_sum(start, end):
         return db.query(func.sum(Document.amount))\
+            .join(Case, Document.case_id == Case.id)\
             .filter(Document.doc_type == DocumentType.PV)\
+            .filter(Case.status.in_([CaseStatus.APPROVED, CaseStatus.PAID, CaseStatus.CLOSED]))\
             .filter(Document.created_at.between(start, end))\
             .scalar() or 0.0
 

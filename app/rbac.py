@@ -44,6 +44,15 @@ def get_current_user(db: Session, request: Request) -> Tuple[User | None, JSONRe
                 details={},
             ),
         )
+    if hasattr(user, "is_active") and not user.is_active:
+        return None, JSONResponse(
+            status_code=403,
+            content=make_error_response(
+                code="FORBIDDEN",
+                message="User is disabled",
+                details={},
+            ),
+        )
     return user, None
 
 

@@ -55,6 +55,8 @@ async def get_current_user(
     user = db.execute(select(User).filter(User.id == token_sub)).scalar_one_or_none()
     if user is None:
         raise credentials_exception
+    if hasattr(user, "is_active") and not user.is_active:
+        raise credentials_exception
 
     # 3. Fetch Roles from DB
     user_roles = db.execute(select(UserRole.role).filter_by(user_id=user.id)).scalars().all()

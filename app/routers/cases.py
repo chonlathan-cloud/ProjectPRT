@@ -50,6 +50,9 @@ class CaseAdminView(BaseModel):
     class Config:
         from_attributes = True
 
+class CaseRejectRequest(BaseModel):
+    note: str
+
 # --- Helper Functions ---
 def generate_case_no() -> str:
     today_str = datetime.now(timezone.utc).strftime("%y%m%d")
@@ -242,6 +245,47 @@ async def approve_case(
         message=f"Case Approved ({doc_no})",
         case_id=str(case_id),
         status=new_status.value,
+        doc_no=doc_no
+    )
+
+@router.post("/{case_id}/reject", response_model=WorkflowResponse)
+async def reject_case(
+    case_id: UUID,
+    payload: CaseRejectRequest,
+    current_user: Annotated[UserInDB, Depends(has_role([Role.FINANCE, Role.ADMIN, Role.ACCOUNTING]))],
+    db: Session = Depends(get_db)
+):
+    db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
+    if not db_case:
+        raise HTTPException(404, "Case not found")
+
+    if db_case.status != CaseStatus.SUBMITTED:
+        raise HTTPException(409, "Case must be SUBMITTED to reject.")
+
+    note = payload.note.strip()
+    if not note:
+        raise HTTPException(400, "Reject reason is required.")
+
+    doc = db.execute(select(Document).filter_by(case_id=case_id)).scalar_one_or_none()
+    doc_no = doc.doc_no if doc else "N/A"
+
+    old_status = db_case.status
+    db_case.status = CaseStatus.REJECTED
+    db_case.reject_reason = note
+    db_case.rejected_at = datetime.now(timezone.utc)
+    db_case.updated_by = current_user.username
+    db_case.updated_at = datetime.now(timezone.utc)
+
+    db.commit()
+    log_audit_event(
+        db, "case", case_id, "reject", current_user.username,
+        {"old_status": old_status.value, "new_status": db_case.status.value, "doc_no": doc_no, "note": note}
+    )
+
+    return WorkflowResponse(
+        message=f"Case Rejected ({doc_no})",
+        case_id=str(case_id),
+        status=db_case.status.value,
         doc_no=doc_no
     )
 

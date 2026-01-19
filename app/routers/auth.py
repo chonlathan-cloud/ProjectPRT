@@ -86,6 +86,14 @@ async def login(payload: UserLoginRequest, db: Session = Depends(get_db)):
                 message="Invalid email or password"
             )
         )
+    if hasattr(user, "is_active") and not user.is_active:
+        return JSONResponse(
+            status_code=403,
+            content=make_error_response(
+                code="FORBIDDEN",
+                message="User is disabled"
+            )
+        )
 
     # สร้าง Token
     access_token = create_access_token(sub=str(user.id), email=user.email, name=user.name)
@@ -142,6 +150,14 @@ async def auth_google(payload: GoogleAuthRequest, db: Session = Depends(get_db))
         default_role = UserRole(user_id=db_user.id, role=ROLE_ADMIN if make_admin else ROLE_REQUESTER)
         db.add(default_role)
     else:
+        if hasattr(db_user, "is_active") and not db_user.is_active:
+            return JSONResponse(
+                status_code=403,
+                content=make_error_response(
+                    code="FORBIDDEN",
+                    message="User is disabled"
+                )
+            )
         db_user.email = email
         db_user.name = name
         if make_admin:
@@ -172,4 +188,3 @@ async def get_my_info(current_user: Annotated[UserInDB, Depends(get_current_user
         "username": current_user.username,
         "roles": current_user.roles  # ระบบจะดึงจาก DB ล่าสุดผ่าน get_current_user
     })
-

@@ -86,6 +86,8 @@ class Case(Base):
     # --- New Columns for Voucher System ---
     deposit_account_id = Column(UUID(as_uuid=True), ForeignKey('categories.id', ondelete='RESTRICT'), nullable=True) # สำหรับ RV
     is_receipt_uploaded = Column(Boolean, default=False, nullable=False) # สำหรับ PV (check ใบเสร็จ)
+    reject_reason = Column(Text, nullable=True)
+    rejected_at = Column(DateTime(timezone=True), nullable=True)
 
     created_by = Column(String, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
@@ -207,6 +209,7 @@ class User(Base):
     email = Column(String, nullable=True, unique=True)
     name = Column(String, nullable=True)
     position = Column(String, nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False)
     hashed_password = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     roles = relationship("UserRole", back_populates="user", cascade="all, delete-orphan")

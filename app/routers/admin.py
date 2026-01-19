@@ -6,7 +6,7 @@ from app.db import get_db
 from app.models import User, UserRole
 from app.rbac import ROLE_ADMIN, ALL_ROLES, require_roles
 from app.schemas.common import make_success_response, make_error_response
-from app.schemas.admin import RolesUpdateRequest
+from app.schemas.admin import RolesUpdateRequest, UserUpdateRequest
 
 router = APIRouter(
     prefix="/api/v1",
@@ -20,7 +20,7 @@ async def list_users(request: Request, db: Session = Depends(get_db)):
     if auth_error:
         return auth_error
 
-    users = db.query(User).all()
+    users = db.query(User).filter(User.is_active.is_(True)).all()
     results = []
     for user in users:
         roles = [ur.role for ur in db.query(UserRole).filter(UserRole.user_id == user.id).all()]
@@ -30,7 +30,9 @@ async def list_users(request: Request, db: Session = Depends(get_db)):
                 "google_sub": user.google_sub,
                 "email": user.email,
                 "name": user.name,
+                "position": user.position,
                 "roles": roles,
+                "is_active": user.is_active,
             }
         )
     return make_success_response(results)
@@ -77,7 +79,76 @@ async def update_user_roles(user_id: str, payload: RolesUpdateRequest, request: 
             "google_sub": user.google_sub,
             "email": user.email,
             "name": user.name,
+            "position": user.position,
             "roles": roles,
+            "is_active": user.is_active,
+        }
+    )
+
+
+@router.patch("/admin/users/{user_id}")
+async def update_user(user_id: str, payload: UserUpdateRequest, request: Request, db: Session = Depends(get_db)):
+    _, auth_error = require_roles(db, request, [ROLE_ADMIN])
+    if auth_error:
+        return auth_error
+
+    user = db.query(User).filter(User.id == user_id, User.is_active.is_(True)).first()
+    if not user:
+        return JSONResponse(
+            status_code=404,
+            content=make_error_response(
+                code="NOT_FOUND",
+                message="User not found",
+                details={},
+            ),
+        )
+
+    update_data = payload.model_dump(exclude_unset=True)
+    if "name" in update_data:
+        user.name = update_data["name"]
+    if "position" in update_data:
+        user.position = update_data["position"]
+
+    db.commit()
+    db.refresh(user)
+
+    return make_success_response(
+        {
+            "user_id": str(user.id),
+            "google_sub": user.google_sub,
+            "email": user.email,
+            "name": user.name,
+            "position": user.position,
+            "is_active": user.is_active,
+        }
+    )
+
+
+@router.delete("/admin/users/{user_id}")
+async def delete_user(user_id: str, request: Request, db: Session = Depends(get_db)):
+    _, auth_error = require_roles(db, request, [ROLE_ADMIN])
+    if auth_error:
+        return auth_error
+
+    user = db.query(User).filter(User.id == user_id, User.is_active.is_(True)).first()
+    if not user:
+        return JSONResponse(
+            status_code=404,
+            content=make_error_response(
+                code="NOT_FOUND",
+                message="User not found",
+                details={},
+            ),
+        )
+
+    user.is_active = False
+    db.commit()
+    db.refresh(user)
+
+    return make_success_response(
+        {
+            "user_id": str(user.id),
+            "is_active": user.is_active,
         }
     )
 
