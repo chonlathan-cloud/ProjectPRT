@@ -44,6 +44,7 @@ class PaymentType(enum.Enum):
 class AttachmentType(enum.Enum):
     QUOTE = "QUOTE"
     RECEIPT = "RECEIPT"
+    PS = "PS"
     OTHER = "OTHER"
 
 # --- Models ---

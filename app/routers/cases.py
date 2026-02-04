@@ -3,9 +3,9 @@ from typing import Optional, List, Annotated
 from uuid import UUID
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Form
 from sqlalchemy.orm import Session
-from sqlalchemy import select
+from sqlalchemy import select, desc
 
 from app.services.doc_numbers import generate_document_no
 
@@ -46,6 +46,7 @@ class CaseAdminView(BaseModel):
     status: str
     department: Optional[str] = None
     is_receipt_uploaded: bool
+    ps_url: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -111,6 +112,7 @@ async def upload_receipt(
     case_id: UUID,
     current_user: Annotated[UserInDB, Depends(get_current_user)],
     file: UploadFile = File(...),
+    attachment_type: AttachmentType = Form(AttachmentType.RECEIPT),
     db: Session = Depends(get_db)
 ):
     db_case = db.execute(select(Case).filter_by(id=case_id)).scalar_one_or_none()
@@ -127,17 +129,18 @@ async def upload_receipt(
     gcs_uri = gcs.upload_bytes(
         destination_blob_name,
         file_content,
-        content_type=file.content_type or "application/octet-stream"
+        content_type=file.content_type or "application/octet-stream",
     )
 
     attachment = Attachment(
         case_id=case_id,
-        type=AttachmentType.RECEIPT,
+        type=attachment_type,
         gcs_uri=destination_blob_name,
         uploaded_by=current_user.username
     )
     db.add(attachment)
-    db_case.is_receipt_uploaded = True
+    if attachment_type == AttachmentType.RECEIPT:
+        db_case.is_receipt_uploaded = True
     db.commit()
     db.refresh(attachment)
 
@@ -343,8 +346,23 @@ async def read_cases(
 
     results = db.execute(query).all()
 
+    case_ids = [row.id for row in results]
+    ps_map: dict[UUID, str] = {}
+    if case_ids:
+        ps_rows = db.query(Attachment.case_id, Attachment.gcs_uri, Attachment.uploaded_at)\
+            .filter(
+                Attachment.type == AttachmentType.PS,
+                Attachment.case_id.in_(case_ids)
+            )\
+            .order_by(Attachment.case_id, desc(Attachment.uploaded_at))\
+            .all()
+        for case_id, gcs_uri, _uploaded_at in ps_rows:
+            if case_id not in ps_map:
+                ps_map[case_id] = gcs_uri
+
     mapped_results = []
     for row in results:
+        ps_gcs_uri = ps_map.get(row.id)
         mapped_results.append(CaseAdminView(
             id=row.id,
             case_no=row.case_no,
@@ -355,7 +373,8 @@ async def read_cases(
             created_at=row.created_at,
             status=row.status.value,
             department=row.department,
-            is_receipt_uploaded=bool(row.is_receipt_uploaded)
+            is_receipt_uploaded=bool(row.is_receipt_uploaded),
+            ps_url=gcs.generate_signed_download_url(ps_gcs_uri) if ps_gcs_uri else None
         ))
 
     return mapped_results
@@ -375,6 +394,14 @@ async def search_cases(
     mapped_results = []
     for row in results:
         doc = db.query(Document).filter(Document.case_id == row.id).first()
+        ps_attachment = db.query(Attachment)\
+            .filter(
+                Attachment.type == AttachmentType.PS,
+                Attachment.case_id == row.id
+            )\
+            .order_by(desc(Attachment.uploaded_at))\
+            .first()
+        ps_url = gcs.generate_signed_download_url(ps_attachment.gcs_uri) if ps_attachment else None
         mapped_results.append(CaseAdminView(
             id=row.id,
             case_no=row.case_no,
@@ -385,7 +412,8 @@ async def search_cases(
             created_at=row.created_at,
             status=row.status.value,
             department=row.department_id,
-            is_receipt_uploaded=bool(row.is_receipt_uploaded)
+            is_receipt_uploaded=bool(row.is_receipt_uploaded),
+            ps_url=ps_url
         ))
     return mapped_results
 

@@ -57,9 +57,26 @@ def generate_download_url(object_name: str) -> str:
         logger.warning("Signed URL unavailable; falling back to public URL.")
         return blob.public_url
 
-def upload_bytes(object_name: str, data: bytes, content_type: str = "application/pdf") -> str:
+def generate_public_url(object_name: str) -> str:
+    client = _get_storage_client()
+    bucket = client.bucket(settings.GCS_BUCKET_NAME)
+    blob = bucket.blob(object_name)
+    return blob.public_url
+
+
+def upload_bytes(
+    object_name: str,
+    data: bytes,
+    content_type: str = "application/pdf",
+    make_public: bool = False,
+) -> str:
     client = _get_storage_client()
     bucket = client.bucket(settings.GCS_BUCKET_NAME)
     blob = bucket.blob(object_name)
     blob.upload_from_string(data, content_type=content_type)
+    if make_public:
+        try:
+            blob.make_public()
+        except Exception as exc:
+            logger.warning("Failed to make object public: %s", exc)
     return f"gs://{settings.GCS_BUCKET_NAME}/{object_name}"
