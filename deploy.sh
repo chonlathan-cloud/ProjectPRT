@@ -12,6 +12,14 @@ DB_USER="prt_app"
 DB_PASSWORD="Pao_122546"    # <--- อย่าลืมใส่รหัสผ่าน DB ตรงนี้ (ถ้ายังไม่ได้ใส่)
 DB_NAME="prt"              
 
+# GCS / Auth config (ให้ตรงกับ .env ของคุณ)
+GCS_BUCKET_NAME="acct-docs-dev"
+GCS_BASE_PATH="prt"
+SIGNED_URL_EXPIRATION_SECONDS="604800"
+GOOGLE_CLOUD_PROJECT="$PROJECT_ID"
+GOOGLE_APPLICATION_CREDENTIALS="/app/service-account.json"
+GOOGLE_CLIENT_ID="886029565568-fc4i9cgm7s07kf9p5vv9g49kpsie1kh1.apps.googleusercontent.com"
+
 # URL แบบใหม่สำหรับ Artifact Registry (asia-southeast1-docker.pkg.dev)
 IMAGE_URL="asia-southeast1-docker.pkg.dev/$PROJECT_ID/$REPO_NAME/$SERVICE_NAME"
 
@@ -58,7 +66,12 @@ gcloud run deploy $SERVICE_NAME \
   --add-cloudsql-instances $INSTANCE_CONNECTION_NAME \
   --set-env-vars "DATABASE_URL=$DB_URL" \
   --set-env-vars "USE_MOCK_DATA=false" \
-  --set-env-vars "GCS_BUCKET_NAME=acct-docs-dev" \
+  --set-env-vars "GCS_BUCKET_NAME=$GCS_BUCKET_NAME" \
+  --set-env-vars "GCS_BASE_PATH=$GCS_BASE_PATH" \
+  --set-env-vars "SIGNED_URL_EXPIRATION_SECONDS=$SIGNED_URL_EXPIRATION_SECONDS" \
+  --set-env-vars "GOOGLE_CLOUD_PROJECT=$GOOGLE_CLOUD_PROJECT" \
+  --set-env-vars "GOOGLE_APPLICATION_CREDENTIALS=$GOOGLE_APPLICATION_CREDENTIALS" \
+  --set-env-vars "GOOGLE_CLIENT_ID=$GOOGLE_CLIENT_ID" \
   --set-env-vars "SECRET_KEY=prt-secret-key-2025" \
   --port 8080
 
