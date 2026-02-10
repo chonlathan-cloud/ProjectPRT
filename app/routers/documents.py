@@ -1,6 +1,7 @@
 # app/routers/dashboard.py
 from fastapi import APIRouter, Request, Depends, Query, HTTPException, status
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy import func, desc, extract
 from datetime import datetime, date
 
@@ -159,6 +160,17 @@ async def create_jv(
     if not main_case:
         raise HTTPException(404, "Main case not found")
 
+    # 1.1 ป้องกันสร้าง JV ซ้ำใน case เดิม
+    existing_jv = db.query(Document).filter(
+        Document.case_id == main_case.id,
+        Document.doc_type == DocumentType.JV
+    ).first()
+    if existing_jv:
+        raise HTTPException(
+            status_code=409,
+            detail="JV already exists for this case"
+        )
+
     # 2. คำนวณยอดรวมจากทุก Case ที่เลือกรวมกัน
     total_amount = main_case.requested_amount
     all_case_ids = [payload.main_case_id] + payload.linked_case_ids
@@ -182,7 +194,14 @@ async def create_jv(
         created_by="system" 
     )
     db.add(jv_doc)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="JV already exists for this case"
+        )
 
     # 4. สร้าง JV Line Items (Link กลับไปหา Case เดิม)
     for cid in all_case_ids:
@@ -197,6 +216,13 @@ async def create_jv(
         # Option: ปิด Case เดิมเพื่อไม่ให้เอาไปใช้ซ้ำ
         c.status = CaseStatus.CLOSED
         
-    db.commit()
-    db.refresh(jv_doc)
+    try:
+        db.commit()
+        db.refresh(jv_doc)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="JV already exists for this case"
+        )
     return jv_doc
