@@ -1,0 +1,39 @@
+# 1. System & Git
+.git/
+.gitignore
+.DS_Store
+
+# 2. Python Environment & Cache (สำคัญมาก ห้ามเอาขึ้น)
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 3. Local Configuration & Secrets (🚨 สำคัญที่สุดด้านความปลอดภัย)
+.env
+.env.local
+config.local.py
+# (ถ้ามีไฟล์ service account key json ให้ใส่ด้วย เช่น *.json แต่ระวังอย่า ignore ไฟล์ที่ต้องใช้นะ)
+
+# 4. Documentation & Specs (ไม่จำเป็นสำหรับ Run App)
+specs/
+docs/
+README.md
+*.md
+
+# 5. Tests (ไม่จำเป็นบน Production)
+tests/
+test_*.py
+
+# 6. Database / Seed files (ถ้าไม่ได้ใช้ตอน Run)
+*.sqlite3
+seed_*.py 
+# (หมายเหตุ: ถ้าคุณใช้ seed_cloud.py ใน Cloud Run Job อาจจะต้องเว้นไว้ แต่ปกติเราไม่เอา seed ขึ้นตัว app หลักครับ)
+
+# 7. Other Temp Files
+dist/
+build/
+*.log
