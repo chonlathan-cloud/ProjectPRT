@@ -6,6 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
+from app.constants.revenue_income_types import REVENUE_INCOME_TYPES
 from app.db import get_db
 from app.models import Case, CaseStatus, Category, CategoryType
 from app.schemas.common import ResponseEnvelope, make_success_response
@@ -26,6 +27,16 @@ class ProfitLossEntry(BaseModel):
 
 class ProfitLossEnvelope(ResponseEnvelope[Dict[str, List[ProfitLossEntry]]]):
     data: Dict[str, List[ProfitLossEntry]]
+
+
+class RevenueIncomeTypeEntry(BaseModel):
+    account_code: str
+    label: str
+    total: float = 0.0
+
+
+class RevenueIncomeTypeEnvelope(ResponseEnvelope[List[RevenueIncomeTypeEntry]]):
+    data: List[RevenueIncomeTypeEntry]
 
 
 TEMPLATES = {
@@ -134,6 +145,34 @@ def _build_sheet(template_rows: List[dict], totals: Dict[str, float]) -> List[Pr
     return built_rows
 
 
+def _get_revenue_income_type_totals(
+    db: Session,
+    start_dt: datetime,
+    end_dt: datetime
+) -> Dict[str, float]:
+    revenue_income_codes = [code for code, _ in REVENUE_INCOME_TYPES]
+    results = db.execute(
+        select(
+            Category.account_code,
+            func.coalesce(func.sum(Case.requested_amount), 0)
+        )
+        .join(Category, Case.category_id == Category.id)
+        .where(
+            Case.status.in_([CaseStatus.APPROVED, CaseStatus.CLOSED]),
+            Case.created_at >= start_dt,
+            Case.created_at < end_dt,
+            Category.type == CategoryType.REVENUE,
+            Category.account_code.in_(revenue_income_codes),
+        )
+        .group_by(Category.account_code)
+    ).all()
+
+    totals: Dict[str, float] = {}
+    for account_code, total in results:
+        totals[str(account_code)] = float(total or 0)
+    return totals
+
+
 @router.get("", response_model=ProfitLossEnvelope)
 def get_profit_loss_data(
     year: int = Query(..., description="B.E. year (e.g., 2565)"),
@@ -147,3 +186,22 @@ def get_profit_loss_data(
         payload[sheet_name] = _build_sheet(rows, totals)
 
     return make_success_response(payload)
+
+
+@router.get("/revenue-income-types", response_model=RevenueIncomeTypeEnvelope)
+def get_revenue_income_type_report(
+    year: int = Query(..., description="B.E. year (e.g., 2565)"),
+    db: Session = Depends(get_db)
+):
+    start_dt, end_dt = _to_fiscal_year_range(year)
+    totals = _get_revenue_income_type_totals(db, start_dt, end_dt)
+
+    items = [
+        RevenueIncomeTypeEntry(
+            account_code=code,
+            label=label,
+            total=totals.get(code, 0.0),
+        )
+        for code, label in REVENUE_INCOME_TYPES
+    ]
+    return make_success_response(items)

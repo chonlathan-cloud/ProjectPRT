@@ -1,12 +1,14 @@
 import uuid
 from sqlalchemy import create_engine, text
-from app.settings import settings
+from sqlalchemy.exc import OperationalError
+
+from app.core.settings import settings
+from app.constants.revenue_income_types import REVENUE_INCOME_TYPES
 
 # --- CONFIGURATION ---
 # ถ้า Run บนเครื่อง local และต่อ Cloud SQL Proxy ใช้ localhost
-# DB_URL = "postgresql://prt_app:YOUR_PASSWORD@127.0.0.1:6543/prt"
 # ถ้าใช้ env file ให้ดึงจาก settings (ต้องแน่ใจว่าค่าถูกต้อง)
-DB_URL = "postgresql://prt_app:Pao_122546@127.0.0.1:6543/prt" 
+DB_URL = settings.DATABASE_URL
 
 def seed_categories_full():
     print(f"🚀 Connecting to database...")
@@ -24,7 +26,7 @@ def seed_categories_full():
         ("ลูกหนี้การค้า", "10300", "ASSET"),
         ("สินทรัพย์อื่นๆ", "10400", "ASSET"),
 
-        # --- หมวด 4: รายได้ (REVENUE) ---
+        # --- หมวด 4: รายได้ (REVENUE) เดิม ---
         ("เงินอุดหนุนโรงเรียนพระปริยัติธรรมฯ", "401011", "REVENUE"),
         ("เงินอุดหนุนโรงเรียนพระปริยัติธรรมฯ ธรรม-บาลี", "401012", "REVENUE"),
         ("อุดหนุนสมทบ โควิด", "401013", "REVENUE"),
@@ -56,30 +58,37 @@ def seed_categories_full():
         ("ค่าธรรมเนียมการโอน", "501203", "EXPENSE"),
         ("เงินสำรองค่าใช้จ่ายล่วงหน้า", "509", "EXPENSE"),
     ]
+    categories.extend((name, code, "REVENUE") for code, name in REVENUE_INCOME_TYPES)
 
-    with engine.connect() as conn:
-        print(f"📦 Upserting {len(categories)} categories...")
-        
-        for name, code, cat_type in categories:
-            # ใช้ UPSERT: ถ้ามี Code นี้อยู่แล้ว ให้ Update ชื่อและประเภท (ป้องกัน Error Duplicate)
-            sql = text("""
-                INSERT INTO categories (id, name_th, account_code, type, is_active, created_by, created_at)
-                VALUES (:id, :name, :code, :type, TRUE, 'system_seed', NOW())
-                ON CONFLICT (account_code) DO UPDATE 
-                SET name_th = EXCLUDED.name_th, 
-                    type = EXCLUDED.type,
-                    is_active = TRUE;
-            """)
+    try:
+        with engine.connect() as conn:
+            print(f"📦 Upserting {len(categories)} categories...")
             
-            conn.execute(sql, {
-                "id": uuid.uuid4(),
-                "name": name,
-                "code": code,
-                "type": cat_type
-            })
-            
-        conn.commit()
-        print("✅ Success! Categories seeded/updated successfully.")
+            for name, code, cat_type in categories:
+                # ใช้ UPSERT: ถ้ามี Code นี้อยู่แล้ว ให้ Update ชื่อและประเภท (ป้องกัน Error Duplicate)
+                sql = text("""
+                    INSERT INTO categories (id, name_th, account_code, type, is_active, created_by, created_at)
+                    VALUES (:id, :name, :code, :type, TRUE, 'system_seed', NOW())
+                    ON CONFLICT (account_code) DO UPDATE 
+                    SET name_th = EXCLUDED.name_th, 
+                        type = EXCLUDED.type,
+                        is_active = TRUE;
+                """)
+                
+                conn.execute(sql, {
+                    "id": uuid.uuid4(),
+                    "name": name,
+                    "code": code,
+                    "type": cat_type
+                })
+                
+            conn.commit()
+            print("✅ Success! Categories seeded/updated successfully.")
+    except OperationalError as exc:
+        raise RuntimeError(
+            "Database connection failed. ตรวจสอบค่า DATABASE_URL ใน .env และให้แน่ใจว่า PostgreSQL/Cloud SQL Proxy "
+            "กำลังรันอยู่ที่ host/port ตาม URL นั้น"
+        ) from exc
 
 if __name__ == "__main__":
     seed_categories_full()

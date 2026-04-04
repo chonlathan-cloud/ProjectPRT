@@ -4,6 +4,7 @@
 .DS_Store
 
 # 2. Python Environment & Cache (สำคัญมาก ห้ามเอาขึ้น)
+.nenv/
 .venv/
 venv/
 env/

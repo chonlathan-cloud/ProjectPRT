@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import select, and_
 
+from app.constants.revenue_income_types import REVENUE_INCOME_TYPE_CODES
 from app.db import get_db
 from app.deps import Role, has_role,UserInDB
 from app.models import Category, CategoryType, AuditLog
@@ -15,6 +16,25 @@ router = APIRouter(
     prefix="/api/v1/categories",
     tags=["Categories"]
 )
+
+@router.get("/revenue-income-types", response_model=List[CategoryResponse])
+async def read_revenue_income_types(
+    active: bool = True,
+    db: Session = Depends(get_db)
+):
+    query = (
+        select(Category)
+        .where(
+            and_(
+                Category.is_active == active,
+                Category.type == CategoryType.REVENUE,
+                Category.account_code.in_(REVENUE_INCOME_TYPE_CODES),
+            )
+        )
+        .order_by(Category.account_code.asc())
+    )
+    categories = db.execute(query).scalars().all()
+    return [CategoryResponse.model_validate(cat) for cat in categories]
 
 @router.get("/", response_model=List[CategoryResponse])
 async def read_categories(
